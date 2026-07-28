@@ -2,7 +2,7 @@
 import { useState, memo } from "react";
 import { cn } from "@/lib/cn";
 import { useWorkspaceStore } from "@/stores/workspace-store";
-import { useSettingsStore, DEFAULT_SETTINGS, type Settings } from "@/stores/settings-store";
+import { useSettingsStore, type Settings } from "@/stores/settings-store";
 import { X, Search, ChevronRight, Minus, Square, ChevronsUpDown, ExternalLink, Check } from "lucide-react";
 import { themes } from "@/lib/themes";
 import {

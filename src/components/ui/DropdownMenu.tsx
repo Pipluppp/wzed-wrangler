@@ -237,7 +237,7 @@ export function DropdownMenuContent({
 
   const computedStyle: React.CSSProperties = fixed
     ? { position: "fixed", ...style }
-    : { position: "fixed", ...(pos ?? {}), ...style };
+    : { position: "fixed", ...pos, ...style };
 
   const content = (
     <div

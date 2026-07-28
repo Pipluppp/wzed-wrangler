@@ -1,41 +1,58 @@
 {
-  "name": "wzed",
+  "name": "wzed-wrangler",
   "version": "0.1.0",
+  "description": "Browser-only IDE with one-click temporary Cloudflare deployments",
   "private": true,
+  "license": "MIT WITH Commons-Clause",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Pipluppp/wzed-wrangler.git"
+  },
+  "homepage": "https://github.com/Pipluppp/wzed-wrangler#readme",
+  "bugs": {
+    "url": "https://github.com/Pipluppp/wzed-wrangler/issues"
+  },
+  "engines": {
+    "node": ">=22.0.0"
+  },
   "scripts": {
-    "dev": "next dev",
-    "build": "next build",
-    "start": "next start",
-    "lint": "eslint",
-    "dev:vinext": "vite dev --port 3001",
-    "build:vinext": "vite build"
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "typecheck": "tsc --noEmit",
+    "lint": "oxlint --type-aware --deny-warnings src vite.config.ts",
+    "check": "npm run typecheck && npm run lint",
+    "check:deno": "deno task --config relay-deno/deno.json check",
+    "test:deno": "deno task --config relay-deno/deno.json test",
+    "preview:deno": "deno task --config relay-deno/deno.json start",
+    "deploy:deno": "npm run build && deno run --allow-env --allow-read --allow-write --allow-run scripts/deploy-deno.ts",
+    "test": "vitest run"
   },
   "dependencies": {
     "@itsmeadarsh/warper": "^7.2.0",
     "@monaco-editor/react": "^4.7.0",
-    "@scelar/nodepod": "^1.0.9",
-    "@vitejs/plugin-rsc": "^0.5.21",
+    "@scelar/nodepod": "https://github.com/Pipluppp/nodepod/releases/download/v1.9.13-wzed.1/scelar-nodepod-1.9.13-wzed.1.tgz",
     "@xterm/addon-fit": "^0.11.0",
     "@xterm/xterm": "^6.0.0",
     "clsx": "^2.1.1",
     "lucide-react": "^0.574.0",
-    "next": "16.1.6",
-    "react": "19.2.3",
-    "react-dom": "19.2.3",
+    "react": "19.2.8",
+    "react-dom": "19.2.8",
     "tailwind-merge": "^3.4.1",
     "zustand": "^5.0.11"
   },
   "devDependencies": {
     "@tailwindcss/postcss": "^4",
-    "@types/node": "^20",
+    "@types/node": "^25",
     "@types/react": "^19",
     "@types/react-dom": "^19",
-    "eslint": "^9",
-    "eslint-config-next": "16.1.6",
+    "@vitejs/plugin-react": "6.0.4",
+    "oxlint": "1.76.0",
+    "oxlint-tsgolint": "7.0.2001",
     "tailwindcss": "^4",
-    "typescript": "5.9.3",
-    "vinext": "^0.0.13",
-    "vite": "^7.3.1"
+    "typescript": "7.0.2",
+    "vite": "8.1.5",
+    "vitest": "4.1.10"
   },
   "ignoreScripts": [
     "sharp",

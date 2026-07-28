@@ -814,18 +814,31 @@ export async function fetchOpenRouterModels(apiKey: string): Promise<OpenRouterM
       headers: { Authorization: `Bearer ${apiKey}` },
     });
     if (!res.ok) throw new Error(`Failed to fetch models: ${res.status}`);
-    const json = await res.json();
-    const models: OpenRouterModel[] = (json.data ?? [])
-      .filter((m: any) => m.id && m.name)
-      .map((m: any) => ({
-        id: m.id,
-        name: m.name,
-        context_length: m.context_length ?? 0,
-        pricing: {
-          prompt: m.pricing?.prompt ?? "0",
-          completion: m.pricing?.completion ?? "0",
-        },
-      }))
+    const json: unknown = await res.json();
+    const isRecord = (value: unknown): value is Record<string, unknown> =>
+      typeof value === "object" && value !== null;
+    const data = isRecord(json) && Array.isArray(json.data) ? json.data : [];
+    const models: OpenRouterModel[] = data
+      .filter(
+        (model): model is Record<string, unknown> & { id: string; name: string } =>
+          isRecord(model) &&
+          typeof model.id === "string" &&
+          typeof model.name === "string",
+      )
+      .map((model) => {
+        const pricing = isRecord(model.pricing) ? model.pricing : {};
+        return {
+          id: model.id,
+          name: model.name,
+          context_length:
+            typeof model.context_length === "number" ? model.context_length : 0,
+          pricing: {
+            prompt: typeof pricing.prompt === "string" ? pricing.prompt : "0",
+            completion:
+              typeof pricing.completion === "string" ? pricing.completion : "0",
+          },
+        };
+      })
       .sort((a: OpenRouterModel, b: OpenRouterModel) => a.name.localeCompare(b.name));
     _modelsCache = models;
     _modelsFetchPromise = null;

@@ -93,7 +93,7 @@ const PaneContent = memo(function PaneContent({ paneId }: { paneId: string }) {
   );
 });
 
-const EditorPaneLeaf = memo(function EditorPaneLeaf({ paneId, nodeId }: { paneId: string; nodeId: string }) {
+const EditorPaneLeaf = memo(function EditorPaneLeaf({ paneId }: { paneId: string }) {
   const activePaneId = useWorkspaceStore((s) => s.activePaneId);
   const isTabDragging = useWorkspaceStore((s) => s.dragState?.dragging ?? false);
   const isActive = activePaneId === paneId;
@@ -242,7 +242,7 @@ function SplitResizeHandle({
 
 const SplitLayoutInner = memo(function SplitLayoutInner({ node }: { node: SplitNode }) {
   if (node.type === "leaf" && node.paneId) {
-    return <EditorPaneLeaf paneId={node.paneId} nodeId={node.id} />;
+    return <EditorPaneLeaf paneId={node.paneId} />;
   }
 
   if (!node.children || node.children.length === 0) return null;
@@ -294,7 +294,7 @@ export function MaximizedPane({ paneId }: { paneId: string }) {
   return (
     <div className="fixed inset-0 top-[38px] z-40 p-2 pointer-events-none">
       <div className="w-full h-full rounded-lg overflow-hidden shadow-2xl shadow-black/50 border border-border pointer-events-auto">
-        <EditorPaneLeaf paneId={paneId} nodeId="maximized" />
+        <EditorPaneLeaf paneId={paneId} />
       </div>
     </div>
   );

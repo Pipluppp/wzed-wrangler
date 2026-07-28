@@ -2,70 +2,11 @@ import { create } from "zustand";
 import type { FileNode } from "@/lib/mock-data";
 import { useWorkspaceStore } from "@/stores/workspace-store";
 import { saveProjectSnapshot, loadProjectSnapshot } from "@/lib/snapshot-db";
+import { getTemplateDefinition } from "@/templates";
+import type { Nodepod, NodepodFS, Snapshot } from "@scelar/nodepod";
 
-const DEFAULT_STARTER_FILES: Record<string, string> = {
-  "/project/package.json": JSON.stringify(
-    { name: "my-project", version: "1.0.0", main: "index.js" },
-    null,
-    2,
-  ),
-  "/project/index.js":
-    'const http = require("http");\n\nconst server = http.createServer((req, res) => {\n  res.writeHead(200, { "Content-Type": "text/html" });\n  res.end("<h1>Hello from nodepod!</h1>");\n});\n\nserver.listen(3000, () => {\n  console.log("Server running on port 3000");\n});\n',
-  "/project/README.md":
-    "# My Project\n\nRun `node index.js` in the terminal to start the server.\n",
-};
-
-const TEMPLATE_STARTER_FILES: Record<string, Record<string, string>> = {
-  blank: {
-    "/project/package.json": JSON.stringify(
-      { name: "my-project", version: "1.0.0" },
-      null,
-      2,
-    ),
-    "/project/index.js": 'console.log("Hello world!");\n',
-  },
-  react: {
-    "/project/package.json": JSON.stringify(
-      {
-        name: "react-app",
-        version: "1.0.0",
-        scripts: { dev: "vite" },
-        dependencies: { react: "^19", "react-dom": "^19" },
-        devDependencies: { vite: "^7", "@vitejs/plugin-react": "^4" },
-      },
-      null,
-      2,
-    ),
-    "/project/index.html":
-      '<!DOCTYPE html>\n<html lang="en">\n  <head>\n    <meta charset="UTF-8" />\n    <meta name="viewport" content="width=device-width, initial-scale=1.0" />\n    <title>React App</title>\n  </head>\n  <body>\n    <div id="root"></div>\n    <script type="module" src="/src/main.jsx"></script>\n  </body>\n</html>\n',
-    "/project/src/main.jsx":
-      'import React from "react";\nimport ReactDOM from "react-dom/client";\nimport App from "./App";\n\nReactDOM.createRoot(document.getElementById("root")).render(<App />);\n',
-    "/project/src/App.jsx":
-      'import { useState } from "react";\n\nexport default function App() {\n  const [count, setCount] = useState(0);\n\n  return (\n    <div style={{ fontFamily: "system-ui", textAlign: "center", padding: "4rem" }}>\n      <h1>Vite + React</h1>\n      <button onClick={() => setCount(c => c + 1)}\n        style={{ padding: "0.5rem 1rem", fontSize: "1rem", cursor: "pointer" }}>\n        count: {count}\n      </button>\n    </div>\n  );\n}\n',
-    "/project/vite.config.js":
-      'import { defineConfig } from "vite";\nimport react from "@vitejs/plugin-react";\n\nexport default defineConfig({\n  plugins: [react()],\n});\n',
-  },
-  node: DEFAULT_STARTER_FILES,
-  vite: {
-    "/project/package.json": JSON.stringify(
-      {
-        name: "vite-app",
-        version: "1.0.0",
-        scripts: { dev: "vite" },
-        devDependencies: { vite: "^7" },
-      },
-      null,
-      2,
-    ),
-    "/project/index.html":
-      '<!DOCTYPE html>\n<html lang="en">\n  <head>\n    <meta charset="UTF-8" />\n    <meta name="viewport" content="width=device-width, initial-scale=1.0" />\n    <title>Vite App</title>\n  </head>\n  <body>\n    <h1>Hello Vite!</h1>\n    <p id="info"></p>\n    <script type="module" src="/main.js"></script>\n  </body>\n</html>\n',
-    "/project/main.js":
-      'document.getElementById("info").textContent = "Vite is running!";\nconsole.log("Hello from Vite");\n',
-  },
-};
-
-type NodepodInstance = any;
-type NodepodFSInstance = any;
+type NodepodInstance = Nodepod;
+type NodepodFSInstance = NodepodFS;
 
 let _vfsWatcher: { close(): void } | null = null;
 let _refreshTimer: ReturnType<typeof setTimeout> | null = null;
@@ -84,10 +25,34 @@ function treeFingerprint(nodes: FileNode[]): string {
   walk(nodes);
   return parts.join("\n");
 }
-let _nodepodModuleCache: any = null;
+let _nodepodModuleCache: typeof import("@scelar/nodepod") | null = null;
 
 let _vfsDirty = false;
-let _cachedSnapshot: unknown = null;
+let _cachedSnapshot: Snapshot | null = null;
+
+function isPrivateRuntimePath(path: string): boolean {
+  return [
+    "/home/user/.wrangler",
+    "/project/.wrangler",
+    "/project/.wzed",
+  ].some((root) => path === root || path.startsWith(`${root}/`));
+}
+
+function sanitizeSharedSnapshot(snapshot: Snapshot): Snapshot {
+  if (
+    typeof snapshot !== "object" ||
+    snapshot === null ||
+    !("entries" in snapshot) ||
+    !Array.isArray(snapshot.entries)
+  ) {
+    return snapshot;
+  }
+
+  return {
+    ...snapshot,
+    entries: snapshot.entries.filter((entry) => !isPrivateRuntimePath(entry.path)),
+  };
+}
 
 function getCurrentProjectId(): string | null {
   return useWorkspaceStore.getState().currentProject?.id ?? null;
@@ -95,10 +60,12 @@ function getCurrentProjectId(): string | null {
 
 interface NodepodState {
   instance: NodepodInstance | null;
+  runtimeId: string | null;
   booting: boolean;
   error: string | null;
   serverPorts: Map<number, string>;
   startupCommand: string | null;
+  externalPreviewUrl: string | null;
   dirty: boolean;
 
   boot: (templateId?: string) => Promise<void>;
@@ -107,6 +74,7 @@ interface NodepodState {
   saveSnapshot: () => Promise<void>;
   restoreSnapshot: () => Promise<boolean>;
   getShareUrl: () => Promise<{ url: string } | { error: string } | null>;
+  showExternalPreview: (url: string) => void;
 }
 
 async function vfsToFileNodes(
@@ -123,7 +91,14 @@ async function vfsToFileNodes(
   const folders: FileNode[] = [];
   const files: FileNode[] = [];
   for (const name of entries.sort()) {
-    if (name === "node_modules" || name === ".cache" || name === ".npm")
+    if (
+      name === "node_modules" ||
+      name === ".cache" ||
+      name === ".npm" ||
+      name === ".wzed" ||
+      name === ".wrangler" ||
+      name === ".wrangler-nodepod-log-before"
+    )
       continue;
     const fullPath = dirPath.endsWith("/")
       ? `${dirPath}${name}`
@@ -143,10 +118,12 @@ async function vfsToFileNodes(
 
 export const useNodepodStore = create<NodepodState>((set, get) => ({
   instance: null,
+  runtimeId: null,
   booting: false,
   error: null,
   serverPorts: new Map(),
   startupCommand: null,
+  externalPreviewUrl: null,
   dirty: false,
 
   boot: async (templateId?: string) => {
@@ -160,22 +137,35 @@ export const useNodepodStore = create<NodepodState>((set, get) => ({
       booting: true,
       error: null,
       instance: null,
+      runtimeId: null,
       serverPorts: new Map(),
       startupCommand: null,
+      externalPreviewUrl: null,
     });
 
     try {
       if (!_nodepodModuleCache)
         _nodepodModuleCache = await import("@scelar/nodepod");
       const Nodepod = _nodepodModuleCache.Nodepod;
+      const cloudflareProxyUrl = new URL(
+        "/api/cloudflare?url=",
+        window.location.origin,
+      ).toString();
 
-      const files =
-        TEMPLATE_STARTER_FILES[templateId ?? "node"] ?? DEFAULT_STARTER_FILES;
+      const template = getTemplateDefinition(templateId);
+      const files = template.files;
 
       const instance = await Nodepod.boot({
         files,
         workdir: "/project",
         swUrl: "/__sw__.js",
+        env: {
+          CLOUDFLARE_API_BASE_URL: "https://api.cloudflare.com/client/v4",
+          WZED_CLOUDFLARE_RELAY_URL: cloudflareProxyUrl,
+        },
+        allowedFetchDomains: ["api.cloudflare.com"],
+        corsProxyUrl: cloudflareProxyUrl,
+        corsProxyDomains: ["api.cloudflare.com"],
         onServerReady: (port: number, url: string) => {
           set((s) => {
             const newPorts = new Map(s.serverPorts);
@@ -187,13 +177,12 @@ export const useNodepodStore = create<NodepodState>((set, get) => ({
         },
       });
 
-      const wsTemplates = useWorkspaceStore.getState().templates;
-      const matchedTemplate = templateId
-        ? wsTemplates.find((t) => t.id === templateId)
-        : null;
-      const startupCmd = matchedTemplate?.startupCommand ?? null;
-
-      set({ instance, booting: false, startupCommand: startupCmd });
+      set({
+        instance,
+        runtimeId: instance.instanceId,
+        booting: false,
+        startupCommand: template.startupCommand ?? null,
+      });
 
       const projectId = getCurrentProjectId();
       if (projectId) {
@@ -257,7 +246,15 @@ export const useNodepodStore = create<NodepodState>((set, get) => ({
     _vfsDirty = false;
     _cachedSnapshot = null;
     _lastTreeHash = "";
-    set({ instance: null, serverPorts: new Map(), error: null, dirty: false });
+    set({
+      instance: null,
+      runtimeId: null,
+      serverPorts: new Map(),
+      startupCommand: null,
+      externalPreviewUrl: null,
+      error: null,
+      dirty: false,
+    });
   },
 
   refreshFileTree: async () => {
@@ -330,11 +327,16 @@ export const useNodepodStore = create<NodepodState>((set, get) => ({
       return await createShareUrl(
         ws.currentProject.name,
         ws.currentProject.templateId || "blank",
-        snapshot,
+        sanitizeSharedSnapshot(snapshot),
       );
     } catch (e) {
       console.error("Failed to create share URL:", e);
       return { error: "Failed to create share URL" };
     }
+  },
+
+  showExternalPreview: (url) => {
+    set({ externalPreviewUrl: url });
+    useWorkspaceStore.getState().openTab("tab:browser");
   },
 }));

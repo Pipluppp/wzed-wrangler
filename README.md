@@ -1,160 +1,129 @@
-# wZed
+# wZed Wrangler
 
-A [Zed](https://zed.dev)-inspired playground for [Nodepod](https://github.com/ScelarOrg/Nodepod) — the browser-native Node.js runtime. Features split panes, an integrated terminal running real Node.js in the browser, Monaco code editing, git integration, AI assistant, and live preview — all without a backend.
+wZed Wrangler is a browser-only IDE powered by a browser-runtime fork of
+[Nodepod](https://github.com/Pipluppp/nodepod). It combines Monaco, an xterm terminal, a virtual
+filesystem, local Vite previews, and one-click temporary Cloudflare deployments. End users do not
+need a Cloudflare account, API token, local CLI, or relay configuration.
 
-> **Experimental:** Both wZed and [Nodepod](https://github.com/ScelarOrg/Nodepod) are in early development. Expect bugs, missing features, and breaking changes.
+This fork modernizes the original wZed application from Next.js to a Vite 8 single-page app using
+React 19, TypeScript 7, Tailwind CSS 4, and Oxlint.
 
-> **Disclaimer:** wZed is not affiliated with [Zed Industries](https://zed.dev). This is an independent playground with a Zed-inspired design, built as a frontend for [Nodepod](https://github.com/ScelarOrg/Nodepod).
+> Experimental: Nodepod emulates Node.js inside browser workers. Package compatibility and memory
+> use are not yet equivalent to native Node.js.
 
-![React](https://img.shields.io/badge/React-19.2-blue)
-![Next.js](https://img.shields.io/badge/Next.js-16-black)
-![TypeScript](https://img.shields.io/badge/TypeScript-5-blue)
-![Tailwind](https://img.shields.io/badge/Tailwind-4-38bdf8)
-![License](https://img.shields.io/badge/License-MIT-green)
+## What works
 
-## Features
+- Vanilla Vite and React projects install and preview inside the browser.
+- Project files and editor layouts persist locally.
+- The Vite, React, and Cloudflare Worker templates expose a **Deploy** button.
+- Deploy builds the project, runs a pinned Wrangler inside Nodepod, and creates a temporary
+  Cloudflare preview.
+- The user accepts Cloudflare's terms in one dialog; no setup commands or credentials are needed.
+- The result includes a private claim URL for moving the preview into a Cloudflare account within
+  Cloudflare's time limit.
 
-**Editor**
-- Monaco-powered code editing with 20+ language grammars
-- N-way split panes (horizontal/vertical nesting) with drag-to-resize
-- Tab management with reorder, close, and back/forward navigation
-- Minimap, word wrap, line numbers, indentation guides, cursor styling
+The matching local Vite preview stays inside wZed. The public Cloudflare preview opens in a top-level
+tab because Cloudflare may protect a new accountless hostname with a challenge that browsers are not
+allowed to render in a third-party iframe.
 
-**Terminal**
-- Integrated xterm.js terminal with multiple tabs
-- Runs real Node.js commands in the browser via nodepod (npm, node, shell builtins)
-- ANSI color output themed to match the editor
+`wrangler dev` is intentionally out of scope because it requires the native `workerd` runtime. The
+supported browser-native loop is local Vite preview followed by `wrangler deploy --temporary`.
 
-**File Explorer**
-- Project file tree with create, rename, delete, and duplicate
-- Import local files and folders from your machine
-- Drag-and-drop files between panes
-- Auto-syncs with the in-memory virtual filesystem
+## Runtime boundary
 
-**Git**
-- Full git integration (init, stage, unstage, commit, push, pull)
-- Visual diff view with staged/unstaged file lists
-- GitHub token support for authenticated operations (push, pull, clone)
+wZed pins the immutable
+[Nodepod `v1.9.13-wzed.1` release](https://github.com/Pipluppp/nodepod/releases/tag/v1.9.13-wzed.1)
+directly in `package.json`; a sibling Nodepod checkout is not required.
 
-**AI Assistant**
-- AI-powered chat panel with tool execution (file edit, terminal commands, search)
-- OpenRouter integration with model selection
-- Bug report tool — detects runtime issues and offers to report them on GitHub
+- Nodepod owns reusable runtime behavior: browser workers, filesystem, networking, service-worker
+  preview routing, package loading, and Vite/Rolldown WASI compatibility.
+- wZed owns the product integration: starter templates, deploy UI, the version-pinned Wrangler
+  adapter, the same-origin relay, and temporary-preview results.
 
-**Live Preview**
-- Embedded browser panel for previewing localhost servers
-- Auto-navigates when a server starts (Express, Next.js, Vite, etc.)
+That seam avoids hiding product-specific Wrangler patches inside every Nodepod process while keeping
+the browser-runtime fixes independently upstreamable. See [the architecture notes](docs/architecture.md).
 
-**Extras**
-- Command palette with fuzzy search (`Ctrl+Shift+P`)
-- File finder (`Ctrl+P`)
-- Global text search across project files
-- Customizable keybindings (VSCode, JetBrains, Vim presets)
-- 15+ color themes (One Dark Pro, GitHub, Catppuccin, and more)
-- Persistent layout and settings per project
-- Bug report button for quick issue filing
+## Local development
 
-## Getting Started
-
-### Install and run
+Requirements: Node.js 22+ and npm. Deno 2 is only needed to run or deploy the production server.
 
 ```bash
-git clone https://github.com/ScelarOrg/wZed.git wzed
-cd wzed
-npm install
+git clone https://github.com/Pipluppp/wzed-wrangler.git
+cd wzed-wrangler
+npm ci
 npm run dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) in your browser.
+For the production-equivalent server, including the same-origin relay:
 
-> **Note:** SharedArrayBuffer is required for the nodepod runtime. The Next.js config sets the necessary COEP/COOP headers automatically.
+```bash
+npm run build
+npm run preview:deno
+```
 
-### Git integration
+Open <http://localhost:8000>.
 
-To use push/pull with GitHub, set a personal access token in **Settings > Git > GitHub Token**. The token is stored locally in your browser and never sent to any server.
+## Quality checks
+
+```bash
+npm run check
+npm test
+npm run check:deno
+npm run test:deno
+npm run build
+```
+
+## Production architecture
+
+One Deno Deploy application serves the static Vite build and the narrow Cloudflare API relay. This
+is one-time operator infrastructure; end users only visit the application and click **Deploy**.
+
+```text
+Browser / wZed
+├── Nodepod workers: npm, Vite, Wrangler, virtual filesystem
+├── local preview: instance-scoped service-worker URL
+└── /api/cloudflare/client/v4/*
+    └── same-origin Deno relay
+        └── https://api.cloudflare.com/client/v4/*
+```
+
+The relay is not a general-purpose proxy. It accepts only same-origin requests for Cloudflare's
+Client API, strips browser and proxy credentials, rejects redirects, disables caching, and
+rate-limits clients. Attach Deno KV in production so rate limits are shared across instances.
+
+After configuring a Deno Deploy application once, publish a production revision with:
+
+```bash
+npm run deploy:deno -- --org YOUR_ORG --app YOUR_APP --prod
+```
+
+The script builds the SPA and stages the output in the shape expected by Deno's dynamic uploader.
+See [the Deno deployment guide](relay-deno/README.md) for the one-time application settings.
 
 ## Scripts
 
-| Command | Description |
-|---------|-------------|
-| `npm run dev` | Start Next.js dev server (localhost:3000) |
-| `npm run build` | Production build (static export) |
-| `npm run start` | Serve production build |
-| `npm run lint` | Run ESLint |
+| Command | Purpose |
+| --- | --- |
+| `npm run dev` | Run the Vite development host |
+| `npm run build` | Build the production SPA into `dist/` |
+| `npm run preview` | Preview only the Vite build |
+| `npm run preview:deno` | Serve the SPA and Cloudflare relay locally |
+| `npm run deploy:deno -- --org … --app … --prod` | Stage and publish the complete Deno app |
+| `npm run check` | Type-check and run Oxlint |
+| `npm test` | Run browser-app unit tests |
+| `npm run check:deno` | Type-check the Deno server |
+| `npm run test:deno` | Run relay and static-server tests |
 
-## Project Structure
+## Security notes
 
-```
-src/
-├── app/
-│   ├── layout.tsx              # Root layout, theme setup
-│   └── page.tsx                # Main application shell
-├── components/
-│   ├── TitleBar.tsx            # Menu bar and panel toggles
-│   ├── EditorPane.tsx          # Split pane layout and drag-drop
-│   ├── CodeEditor.tsx          # Monaco editor integration
-│   ├── FileTree.tsx            # Project file explorer
-│   ├── TabBar.tsx              # File tab management
-│   ├── TerminalPanel.tsx       # xterm.js terminal with tabs
-│   ├── BrowserPanel.tsx        # Embedded preview browser
-│   ├── GitPanel.tsx            # Git status, staging, commit, push/pull
-│   ├── AIPanel.tsx             # AI assistant with tool execution
-│   ├── CommandPalette.tsx      # Fuzzy command/file search
-│   ├── SearchPanel.tsx         # Global text search
-│   ├── SettingsModal.tsx       # Preferences UI
-│   ├── KeymapEditor.tsx        # Keybinding customization
-│   ├── HomeScreen.tsx          # Welcome screen with templates
-│   └── ...                     # Context menus, icons, resize handles
-├── stores/
-│   ├── workspace-store.ts      # Editor layout, tabs, panes, open files
-│   ├── nodepod-store.ts        # Nodepod instance and file tree sync
-│   ├── settings-store.ts       # User preferences (persisted)
-│   └── keymap-store.ts         # Keyboard shortcuts
-├── lib/
-│   ├── ai-sdk.ts               # AI agent loop and tool definitions
-│   ├── themes.ts               # Color theme definitions
-│   ├── keybind-dispatcher.ts   # Global keybinding handler
-│   └── mock-data.ts            # Language detection, types
-└── hooks/
-    └── use-resizable.ts        # Resize drag handler
-```
-
-## Tech Stack
-
-| Layer | Technology |
-|-------|-----------|
-| Framework | [Next.js 16](https://nextjs.org) (static export) |
-| UI | [React 19](https://react.dev), [Tailwind CSS 4](https://tailwindcss.com) |
-| State | [Zustand 5](https://zustand.docs.pmnd.rs) |
-| Code Editor | [Monaco Editor](https://microsoft.github.io/monaco-editor/) |
-| Terminal | [xterm.js](https://xtermjs.org) |
-| Runtime | [Nodepod](https://github.com/ScelarOrg/Nodepod) — browser-native Node.js (VFS, npm, shell, workers) |
-| Icons | [Lucide React](https://lucide.dev) |
-
-## How It Works
-
-1. **Boot** — The app dynamically imports Nodepod and creates an in-memory Node.js environment with a virtual filesystem at `/project`.
-2. **Edit** — Files are read/written through Nodepod's async fs API. Monaco renders with language detection and theme-matched colors.
-3. **Run** — Terminal commands spawn worker-based processes. Output streams back in real time. HTTP servers register in Nodepod's server registry.
-4. **Preview** — When a server starts on a port, the browser panel navigates to it. Requests are intercepted and dispatched through Nodepod's HTTP polyfill.
-
-## Project Templates
-
-When creating a new project, choose from:
-
-- **Blank** — Empty workspace
-- **React** — Vite + React starter
-- **Node.js** — HTTP server example
-- **Vite** — Vanilla JS with Vite
-
-Each template comes with starter files and an optional auto-run command.
-
-## Contributing
-
-Found a bug or have a feature request? [Open an issue](https://github.com/ScelarOrg/wZed/issues).
-
-Pull requests are welcome. For major changes, please open an issue first to discuss what you'd like to change.
+- Temporary-account claim URLs are secrets. wZed never places them in share snapshots.
+- `/project/.wzed`, `/project/.wrangler`, and `/home/user/.wrangler` are hidden from the project tree
+  or stripped from shared snapshots.
+- The relay has no operator Cloudflare token. It forwards the user's short-lived temporary
+  authorization headers in memory to Cloudflare and neither stores nor logs them.
+- The relay is infrastructure operated by the wZed host; users do not configure or trust a relay of
+  their own.
 
 ## License
 
-[MIT](LICENSE)
+[MIT with Commons Clause](LICENSE), inherited from the original wZed project.

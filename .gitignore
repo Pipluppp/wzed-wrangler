@@ -13,9 +13,18 @@
 # testing
 /coverage
 
-# next.js
-/.next/
+# generated applications
+/dist/
 /out/
+/.next/
+/next-env.d.ts
+/.wrangler/
+/.wrangler-dry-run/
+/.deno-kv/
+/.deno-deploy*/
+/deno-deploy-*/
+/deno.lock
+/.wzed/
 
 # production
 /build
@@ -26,6 +35,7 @@
 
 # debug
 npm-debug.log*
+*.log
 yarn-debug.log*
 yarn-error.log*
 .pnpm-debug.log*
@@ -38,4 +48,3 @@ yarn-error.log*
 
 # typescript
 *.tsbuildinfo
-next-env.d.ts

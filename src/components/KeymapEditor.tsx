@@ -59,7 +59,7 @@ function KeyBadge({ keys }: { keys: string }) {
   );
 }
 
-function KeyCaptureInput({ value, onChange, onCancel }: { value: string; onChange: (v: string) => void; onCancel: () => void }) {
+function KeyCaptureInput({ onChange, onCancel }: { onChange: (v: string) => void; onCancel: () => void }) {
   const [captured, setCaptured] = useState<string[]>([]);
   const inputRef = useRef<HTMLInputElement>(null);
   const timeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -116,7 +116,6 @@ function BindingRow({ binding }: { binding: KeyBinding }) {
       <td className="py-1.5 px-3">
         {editing ? (
           <KeyCaptureInput
-            value={binding.keys}
             onChange={(keys) => { updateBinding(binding.id, keys); setEditing(false); }}
             onCancel={() => setEditing(false)}
           />
@@ -163,7 +162,6 @@ function CreateBindingRow({ onCreated }: { onCreated: () => void }) {
         <td className="py-1.5 px-3 text-[11px] text-t2">{action}</td>
         <td className="py-1.5 px-3" colSpan={4}>
           <KeyCaptureInput
-            value=""
             onChange={(keys) => {
               addBinding(action, keys, context);
               setCapturingKeys(false);

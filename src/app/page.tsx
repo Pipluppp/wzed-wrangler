@@ -15,6 +15,7 @@ import { SettingsModal } from "@/components/SettingsModal";
 import { ResizeHandle } from "@/components/ui/ResizeHandle";
 import { HomeScreen } from "@/components/HomeScreen";
 import { LoadingOverlay } from "@/components/ui/LoadingOverlay";
+import type { Snapshot } from "@scelar/nodepod";
 
 export default function ZedClone() {
   const leftDock = useWorkspaceStore((s) => s.leftDock);
@@ -54,7 +55,7 @@ export default function ZedClone() {
             version: number;
             name: string;
             templateId: string;
-            snapshot: unknown;
+            snapshot: Snapshot;
           }>(shareData);
           if (
             payload?.version === 1 &&

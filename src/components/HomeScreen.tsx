@@ -10,6 +10,7 @@ import {
   Trash2,
   Code2,
   Globe,
+  Cloud,
   Server,
   FileCode,
   Link,
@@ -36,6 +37,7 @@ const TEMPLATE_ICONS: Record<string, typeof Code2> = {
   react: Code2,
   node: Server,
   vite: Globe,
+  cloudflare: Cloud,
 };
 
 function getTemplateIcon(templateId: string) {
@@ -321,7 +323,7 @@ export function HomeScreen() {
               Recent Projects
             </h2>
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
-              {sorted.map((project, i) => (
+              {sorted.map((project) => (
                 <ProjectCard
                   key={project.id}
                   project={project}

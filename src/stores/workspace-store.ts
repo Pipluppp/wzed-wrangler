@@ -6,6 +6,8 @@ import {
 } from "@/lib/mock-data";
 import { flushSettings } from "@/stores/settings-store";
 import { flushKeybindings } from "@/stores/keymap-store";
+import { TEMPLATE_DEFINITIONS, type DeploymentKind } from "@/templates";
+import type { Snapshot } from "@scelar/nodepod";
 
 export type TabType = "file" | "keymap" | "browser" | "ai";
 
@@ -96,6 +98,7 @@ export interface TemplateInfo {
   name: string;
   description: string;
   startupCommand?: string;
+  deploymentKind?: DeploymentKind;
 }
 
 export type DockPosition = "left" | "right" | "bottom";
@@ -340,7 +343,7 @@ interface WorkspaceState {
   duplicateFile: (filePath: string) => void;
   collapseAll: () => void;
   resetEditorState: () => void;
-  importFromShare: (name: string, templateId: string, snapshot: unknown) => void;
+  importFromShare: (name: string, templateId: string, snapshot: Snapshot) => void;
   deleteProject: (projectId: string) => void;
   renameProject: (projectId: string, newName: string) => void;
   hydrateProjects: () => void;
@@ -359,12 +362,15 @@ function uniqueProjectName(baseName: string, existing: ProjectInfo[]): string {
 // start empty, hydrate from localStorage on client mount
 const INITIAL_PROJECTS: ProjectInfo[] = [];
 
-const INITIAL_TEMPLATES: TemplateInfo[] = [
-  { id: "blank", name: "Empty Project", description: "Start from scratch" },
-  { id: "react", name: "React", description: "Vite + React starter", startupCommand: "npm install && npx vite" },
-  { id: "node", name: "Node.js", description: "Node.js server", startupCommand: "node index.js" },
-  { id: "vite", name: "Vite", description: "Vanilla JS with Vite", startupCommand: "npm install && npx vite" },
-];
+const INITIAL_TEMPLATES: TemplateInfo[] = TEMPLATE_DEFINITIONS.map(
+  ({ id, name, description, startupCommand, deploymentKind }) => ({
+    id,
+    name,
+    description,
+    startupCommand,
+    deploymentKind,
+  }),
+);
 
 export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
   currentProject: null,
@@ -889,7 +895,6 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
     set((s) => { const file = s.openFiles[filePath]; if (!file || !file.modified) return s; return { openFiles: { ...s.openFiles, [filePath]: { ...file, modified: false } } }; }),
 
   createFile: (name, parentPath) => {
-    const s = get();
     const dir = parentPath ?? "/project";
     const fullPath = `${dir}/${name}`;
     const newNode: FileNode = { name, type: "file", path: fullPath };

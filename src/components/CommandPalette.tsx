@@ -1,7 +1,7 @@
 "use client";
 import { useState, useEffect, useRef, useMemo, useCallback } from "react";
 import { cn } from "@/lib/cn";
-import { COMMANDS, type CommandItem, type FileNode } from "@/lib/mock-data";
+import { COMMANDS, type FileNode } from "@/lib/mock-data";
 import { useWorkspaceStore } from "@/stores/workspace-store";
 import { executeAction } from "@/lib/keybind-dispatcher";
 import { useShallow } from "zustand/react/shallow";
@@ -9,8 +9,8 @@ import { FileIcon } from "./ui/FileIcon";
 import { recordUsage, getRecencyBoost } from "@/lib/palette-history";
 import {
   Clock, FileText, Settings, Terminal, GitBranch, Search, Eye,
-  Keyboard, Palette, FolderTree, Globe, Sparkles, ArrowRight,
-  SplitSquareHorizontal, PanelBottom, Maximize2, Type, Hash,
+  FolderTree, ArrowRight,
+  SplitSquareHorizontal, Type, Hash,
 } from "lucide-react";
 
 // maps command palette ids to keybind-dispatcher action strings

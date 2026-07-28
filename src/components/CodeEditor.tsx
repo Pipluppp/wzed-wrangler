@@ -220,7 +220,7 @@ function registerCustomLanguages(monaco: any) {
         [/\$\w+/, "variable"],
         [/@\w+/, "annotation"],
         [/\b\d+(\.\d+)?\b/, "number"],
-        [/[{}()\[\]]/, "delimiter.bracket"],
+        [/[{}()[\]]/, "delimiter.bracket"],
         [/[!:=|&]/, "operator"],
         [/\b[A-Z]\w*\b/, "type"],
         [/\b\w+\b/, {

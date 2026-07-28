@@ -23,7 +23,7 @@ function openDB(): Promise<IDBDatabase> {
   });
 }
 
-export async function saveProjectSnapshot(projectId: string, snapshot: unknown): Promise<void> {
+export async function saveProjectSnapshot(projectId: string, snapshot: Snapshot): Promise<void> {
   const db = await openDB();
   return new Promise((resolve, reject) => {
     const tx = db.transaction(STORE_NAME, "readwrite");
@@ -33,7 +33,7 @@ export async function saveProjectSnapshot(projectId: string, snapshot: unknown):
   });
 }
 
-export async function loadProjectSnapshot(projectId: string): Promise<unknown | null> {
+export async function loadProjectSnapshot(projectId: string): Promise<Snapshot | null> {
   const db = await openDB();
   return new Promise((resolve, reject) => {
     const tx = db.transaction(STORE_NAME, "readonly");
@@ -52,3 +52,4 @@ export async function deleteProjectSnapshot(projectId: string): Promise<void> {
     tx.onerror = () => reject(tx.error);
   });
 }
+import type { Snapshot } from "@scelar/nodepod";

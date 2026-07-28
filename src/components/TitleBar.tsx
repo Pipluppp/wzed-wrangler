@@ -17,8 +17,11 @@ import {
   Share2,
   Check,
   Search,
+  CloudUpload,
 } from "lucide-react";
 import { BugReportModal } from "./BugReportModal";
+import { DeployDialog } from "./DeployDialog";
+import { useDeployStore } from "@/stores/deploy-store";
 import {
   DropdownMenu,
   DropdownMenuTrigger,
@@ -55,6 +58,10 @@ export function TitleBar() {
   const saveSnapshot = useNodepodStore((s) => s.saveSnapshot);
   const dirty = useNodepodStore((s) => s.dirty);
   const getShareUrl = useNodepodStore((s) => s.getShareUrl);
+  const openDeployDialog = useDeployStore((s) => s.openDialog);
+  const currentTemplate = useWorkspaceStore((s) =>
+    s.templates.find((template) => template.id === s.currentProject?.templateId),
+  );
 
   const [saving, setSaving] = useState(false);
   const handleSave = useCallback(async () => {
@@ -202,6 +209,17 @@ export function TitleBar() {
 
             <div className="w-px h-4 bg-border mx-1" />
 
+            {currentTemplate?.deploymentKind && (
+              <button
+                onClick={openDeployDialog}
+                className="flex items-center gap-1.5 rounded-md bg-accent px-2.5 py-1 text-[11px] font-semibold text-bg0 transition-opacity hover:opacity-90"
+                title="Deploy a temporary Cloudflare preview"
+              >
+                <CloudUpload size={13} />
+                Deploy
+              </button>
+            )}
+
             {/* Save button */}
             <button
               onClick={handleSave}
@@ -280,6 +298,7 @@ export function TitleBar() {
       </div>
 
       {bugReportOpen && <BugReportModal onClose={toggleBugReport} />}
+      <DeployDialog />
     </div>
   );
 }

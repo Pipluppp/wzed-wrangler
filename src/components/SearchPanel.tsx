@@ -1,5 +1,5 @@
 "use client";
-import { useState, useCallback, useRef, useEffect, useMemo, memo } from "react";
+import { useState, useCallback, useRef, useEffect, useMemo } from "react";
 import { cn } from "@/lib/cn";
 import { useWorkspaceStore } from "@/stores/workspace-store";
 import {
@@ -57,6 +57,7 @@ export function SearchPanel() {
       if (!_nodepodStoreCache) _nodepodStoreCache = await import("@/stores/nodepod-store");
       const nodepod = _nodepodStoreCache.useNodepodStore.getState().instance;
       if (!nodepod) { setResults([]); setSearching(false); return; }
+      const activeNodepod = nodepod;
 
       let pattern: string;
       let flags = "g";
@@ -85,7 +86,7 @@ export function SearchPanel() {
         if (found.length >= MAX_RESULTS) return;
         let entries: string[];
         try {
-          entries = await nodepod.fs.readdir(dirPath);
+          entries = await activeNodepod.fs.readdir(dirPath);
         } catch { return; }
 
         for (const name of entries) {
@@ -96,7 +97,7 @@ export function SearchPanel() {
           const relPath = relPrefix ? `${relPrefix}/${name}` : name;
 
           try {
-            const stat = await nodepod.fs.stat(fullPath);
+            const stat = await activeNodepod.fs.stat(fullPath);
             if (stat.isDirectory) {
               await searchDir(fullPath, relPath);
             } else {
@@ -105,7 +106,7 @@ export function SearchPanel() {
 
               let content: string;
               try {
-                content = await nodepod.fs.readFile(fullPath, "utf-8");
+                content = await activeNodepod.fs.readFile(fullPath, "utf-8");
                 if (typeof content !== "string") continue;
               } catch { continue; }
 

@@ -92,14 +92,14 @@ export interface SharePayload {
   version: 1;
   name: string;
   templateId: string;
-  snapshot: unknown; // the VFS snapshot object from nodepod
+  snapshot: Snapshot;
 }
 
 /** Create a share URL from the current project. Returns null if too large. */
 export async function createShareUrl(
   name: string,
   templateId: string,
-  snapshot: unknown,
+  snapshot: Snapshot,
 ): Promise<{ url: string } | { error: string }> {
   const payload: SharePayload = {
     version: 1,
@@ -143,3 +143,4 @@ export async function parseShareParam(): Promise<SharePayload | null> {
     return null;
   }
 }
+import type { Snapshot } from "@scelar/nodepod";

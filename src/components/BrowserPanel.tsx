@@ -22,17 +22,33 @@ interface BrowserTab {
 }
 
 let nextTabId = 1;
-function createTab(url = "/__preview__/3000/", title = "Preview"): BrowserTab {
+function createTab(url = "about:blank", title = "Preview"): BrowserTab {
   return { id: `btab-${nextTabId++}`, title, url };
 }
 
 function getPreviewPort(url: string): number | null {
-  const m = url.match(/^\/__preview__\/(\d+)/);
+  const m = url.match(/\/__(?:virtual|preview)\/(?:[^/]+\/)?(\d+)(?:\/|$)/);
   return m ? Number(m[1]) : null;
+}
+
+function isNodepodPreview(url: string): boolean {
+  return /\/__(?:virtual|preview)\//.test(url);
+}
+
+function previewTitle(url: string): string {
+  const port = getPreviewPort(url);
+  if (port) return `localhost:${port}`;
+  try {
+    return new URL(url, window.location.origin).host || "Preview";
+  } catch {
+    return "Preview";
+  }
 }
 
 export function BrowserPanel() {
   const serverPorts = useNodepodStore((s) => s.serverPorts);
+  const runtimeId = useNodepodStore((s) => s.runtimeId);
+  const externalPreviewUrl = useNodepodStore((s) => s.externalPreviewUrl);
   const [tabs, setTabs] = useState<BrowserTab[]>(() => [
     createTab(),
   ]);
@@ -46,16 +62,26 @@ export function BrowserPanel() {
 
   const activeTab = tabs.find((t) => t.id === activeTabId) || tabs[0];
 
-  const firstPort = useMemo(() => {
-    for (const [port] of serverPorts) return port;
+  const firstPreview = useMemo(() => {
+    for (const entry of serverPorts) return entry;
     return null;
   }, [serverPorts]);
 
   useEffect(() => {
-    for (const [port] of serverPorts) {
+    const tab = createTab();
+    navigatedPortsRef.current.clear();
+    setTabs([tab]);
+    setActiveTabId(tab.id);
+    setInputValue(tab.url);
+    setIsLoading(false);
+    setShowSender(false);
+  }, [runtimeId]);
+
+  useEffect(() => {
+    for (const [port, url] of serverPorts) {
       if (!navigatedPortsRef.current.has(port)) {
         navigatedPortsRef.current.add(port);
-        const previewUrl = `/__preview__/${port}/`;
+        const previewUrl = url.endsWith("/") ? url : `${url}/`;
         setTabs((prev) =>
           prev.map((t) =>
             t.id === activeTabId ? { ...t, url: previewUrl, title: `localhost:${port}` } : t
@@ -68,40 +94,53 @@ export function BrowserPanel() {
     }
   }, [serverPorts, activeTabId]);
 
+  useEffect(() => {
+    if (!externalPreviewUrl) return;
+    setTabs((prev) =>
+      prev.map((tab) =>
+        tab.id === activeTabId
+          ? { ...tab, url: externalPreviewUrl, title: previewTitle(externalPreviewUrl) }
+          : tab,
+      ),
+    );
+    setInputValue(externalPreviewUrl);
+    setIsLoading(true);
+  }, [activeTabId, externalPreviewUrl]);
+
   const navigate = useCallback(
     (url: string) => {
       let resolved = url.trim();
       if (!resolved) return;
 
-      if (resolved.startsWith("/__preview__/")) {
-        // already a preview url
+      if (isNodepodPreview(resolved) || /^https?:\/\//i.test(resolved)) {
+        // Nodepod and deployed preview URLs can be used directly.
       } else if (/^localhost:\d+/i.test(resolved)) {
         const m = resolved.match(/^localhost:(\d+)(\/.*)?$/i);
         if (m) {
-          resolved = `/__preview__/${m[1]}${m[2] || "/"}`;
+          const base = serverPorts.get(Number(m[1]));
+          if (!base) return;
+          resolved = new URL((m[2] || "/").replace(/^\//, ""), `${base}/`).toString();
         }
       }
       else if (/^https?:\/\/localhost:\d+/i.test(resolved)) {
         const m = resolved.match(/^https?:\/\/localhost:(\d+)(\/.*)?$/i);
         if (m) {
-          resolved = `/__preview__/${m[1]}${m[2] || "/"}`;
+          const base = serverPorts.get(Number(m[1]));
+          if (!base) return;
+          resolved = new URL((m[2] || "/").replace(/^\//, ""), `${base}/`).toString();
         }
       }
       else if (resolved.startsWith("/")) {
-        const port = getPreviewPort(activeTab.url) || firstPort;
-        if (port) {
-          resolved = `/__preview__/${port}${resolved}`;
-        } else {
-          return;
-        }
+        const port = getPreviewPort(activeTab.url);
+        const base = (port && serverPorts.get(port)) || firstPreview?.[1];
+        if (!base) return;
+        resolved = new URL(resolved.replace(/^\//, ""), `${base}/`).toString();
       }
       else {
         return;
       }
 
-      const title = resolved.startsWith("/__preview__/")
-        ? `localhost:${getPreviewPort(resolved) || ""}${resolved.replace(/^\/__preview__\/\d+/, "")}`
-        : resolved;
+      const title = previewTitle(resolved);
 
       setTabs((prev) =>
         prev.map((t) =>
@@ -111,7 +150,7 @@ export function BrowserPanel() {
       setInputValue(resolved);
       setIsLoading(true);
     },
-    [activeTabId, activeTab.url, firstPort]
+    [activeTabId, activeTab.url, firstPreview, serverPorts]
   );
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
@@ -131,10 +170,12 @@ export function BrowserPanel() {
   };
 
   const goHome = () => {
-    if (firstPort) {
-      navigate(`/__preview__/${firstPort}/`);
+    if (firstPreview) {
+      navigate(firstPreview[1]);
+    } else if (externalPreviewUrl) {
+      navigate(externalPreviewUrl);
     } else {
-      navigate("/__preview__/3000/");
+      return;
     }
   };
 
@@ -167,10 +208,10 @@ export function BrowserPanel() {
     if (tab) setInputValue(tab.url);
   };
 
-  const senderBaseUrl = activeTab.url.startsWith("/__preview__/")
+  const senderBaseUrl = isNodepodPreview(activeTab.url)
     ? activeTab.url
-    : firstPort
-      ? `/__preview__/${firstPort}/`
+    : firstPreview
+      ? firstPreview[1]
       : "/";
 
   return (
@@ -290,6 +331,7 @@ export function BrowserPanel() {
               ref={iframeRef}
               src={activeTab.url}
               className="w-full h-full border-none"
+              allow="cross-origin-isolated"
               sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-popups-to-escape-sandbox"
               onLoad={() => setIsLoading(false)}
               title="Browser"

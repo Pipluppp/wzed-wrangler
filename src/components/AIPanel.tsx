@@ -20,7 +20,6 @@ import { useSettingsStore } from "@/stores/settings-store";
 import { useNodepodStore } from "@/stores/nodepod-store";
 import {
   type ChatMessage,
-  type ToolCallInfo,
   type OpenRouterModel,
   type ErrorReportData,
   runAgentTurn,

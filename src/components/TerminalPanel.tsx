@@ -44,6 +44,7 @@ export function TerminalPanel() {
   const toggleBottomDockMaximized = useWorkspaceStore((s) => s.toggleBottomDockMaximized);
   const bottomDockHeight = useWorkspaceStore((s) => s.bottomDock.height);
   const nodepodInstance = useNodepodStore((s) => s.instance);
+  const runtimeId = useNodepodStore((s) => s.runtimeId);
   const startupCommand = useNodepodStore((s) => s.startupCommand);
   const themeName = useSettingsStore((s) => s.settings.theme);
   const termFontSize = useSettingsStore((s) => s.settings.terminal_font_size);
@@ -59,15 +60,30 @@ export function TerminalPanel() {
   const initialTabCreated = useRef(false);
   const startupExecutedRef = useRef(false);
 
-  const activeTab = tabs.find((t) => t.id === activeTabId);
+  const disposeTerminals = useCallback(() => {
+    for (const terminal of terminalsRef.current.values()) {
+      try { terminal.detach(); } catch { /* ignore */ }
+    }
+    terminalsRef.current.clear();
+    mountedRef.current.clear();
+  }, []);
 
   useEffect(() => {
-    if (nodepodInstance && !initialTabCreated.current) {
+    disposeTerminals();
+    initialTabCreated.current = false;
+    startupExecutedRef.current = false;
+    setTabs([]);
+    setActiveTabId(null);
+
+    if (nodepodInstance) {
+      const id = `term-${Date.now()}`;
       initialTabCreated.current = true;
-      addTab();
+      setTabs([{ id, title: "terminal" }]);
+      setActiveTabId(id);
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [nodepodInstance]);
+
+    return disposeTerminals;
+  }, [disposeTerminals, nodepodInstance, runtimeId]);
 
   useEffect(() => {
     const theme = buildTerminalTheme(themeName);
@@ -97,16 +113,6 @@ export function TerminalPanel() {
       setTimeout(() => { try { terminal.fit(); } catch { /* ignore */ } }, 50);
     }
   }, [bottomDockHeight, bottomDockMaximized, activeTabId]);
-
-  useEffect(() => {
-    return () => {
-      for (const terminal of terminalsRef.current.values()) {
-        try { terminal.detach(); } catch { /* ignore */ }
-      }
-      terminalsRef.current.clear();
-      mountedRef.current.clear();
-    };
-  }, []);
 
   const addTab = useCallback(() => {
     const id = `term-${Date.now()}`;
@@ -148,11 +154,11 @@ export function TerminalPanel() {
           theme: buildTerminalTheme(themeName),
           fontSize: termFontSize,
           fontFamily: `'${termFontFamily}', 'Fira Code', 'JetBrains Mono', 'SF Mono', 'Consolas', monospace`,
-          cursorStyle: termCursor,
-          cursorBlink: termBlinking,
         });
 
         devTerminal.attach(container);
+        devTerminal.xterm.options.cursorStyle = termCursor;
+        devTerminal.xterm.options.cursorBlink = termBlinking;
         devTerminal.showPrompt();
         terminalsRef.current.set(tabId, devTerminal);
 
