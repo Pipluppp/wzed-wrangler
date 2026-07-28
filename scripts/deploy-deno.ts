@@ -1,3 +1,10 @@
+const [organization, application] = Deno.args;
+
+if (!organization || !application) {
+  console.error("Usage: npm run deploy:deno -- YOUR_ORG YOUR_APP");
+  Deno.exit(2);
+}
+
 const stage = await Deno.makeTempDir({ prefix: "wzed-wrangler-deploy-" });
 
 async function copyDirectory(
@@ -24,7 +31,14 @@ try {
 
   console.log(`Deploying staged application from ${stage}`);
   const command = new Deno.Command(Deno.execPath(), {
-    args: ["deploy", ...Deno.args],
+    args: [
+      "deploy",
+      "--org",
+      organization,
+      "--app",
+      application,
+      "--prod",
+    ],
     cwd: stage,
     stdin: "inherit",
     stdout: "inherit",

@@ -53,7 +53,7 @@ secret.
 Authenticate once with `deno deploy`, then run from the repository root:
 
 ```sh
-npm run deploy:deno -- --org YOUR_ORG --app YOUR_APP --prod
+npm run deploy:deno -- YOUR_ORG YOUR_APP
 ```
 
 The command builds the Vite app, stages `dist/` as `out/`, copies the relay

@@ -94,7 +94,7 @@ rate-limits clients. Attach Deno KV in production so rate limits are shared acro
 After configuring a Deno Deploy application once, publish a production revision with:
 
 ```bash
-npm run deploy:deno -- --org YOUR_ORG --app YOUR_APP --prod
+npm run deploy:deno -- YOUR_ORG YOUR_APP
 ```
 
 The script builds the SPA and stages the output in the shape expected by Deno's dynamic uploader.
@@ -108,7 +108,7 @@ See [the Deno deployment guide](relay-deno/README.md) for the one-time applicati
 | `npm run build` | Build the production SPA into `dist/` |
 | `npm run preview` | Preview only the Vite build |
 | `npm run preview:deno` | Serve the SPA and Cloudflare relay locally |
-| `npm run deploy:deno -- --org … --app … --prod` | Stage and publish the complete Deno app |
+| `npm run deploy:deno -- ORG APP` | Stage and publish the complete Deno app |
 | `npm run check` | Type-check and run Oxlint |
 | `npm test` | Run browser-app unit tests |
 | `npm run check:deno` | Type-check the Deno server |
