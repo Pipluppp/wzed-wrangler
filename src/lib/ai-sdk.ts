@@ -292,22 +292,12 @@ export function createNodepodToolExecutor(nodepod: any, options?: ToolExecutorOp
         if (pathErr) return `Error: ${pathErr}`;
         const content = args.content as string;
         try {
-          await nodepod.fs.writeFile(path, content);
+          const { writeWorkspaceFile } = await import("@/lib/workspace-repository");
+          await writeWorkspaceFile(path, content);
           // Refresh the file tree in the workspace
           try {
             const { useNodepodStore } = await getNodepodStoreModule();
             await useNodepodStore.getState().refreshFileTree();
-          } catch { /* ignore */ }
-          // Sync open editor tabs with the new content
-          try {
-            const { useWorkspaceStore } = await import("@/stores/workspace-store");
-            const ws = useWorkspaceStore.getState();
-            const existing = ws.openFiles[path];
-            if (existing) {
-              useWorkspaceStore.setState((s) => ({
-                openFiles: { ...s.openFiles, [path]: { ...existing, content, modified: false } },
-              }));
-            }
           } catch { /* ignore */ }
           return `Wrote ${content.length} chars to ${path}`;
         } catch (e: any) {

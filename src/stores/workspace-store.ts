@@ -1,13 +1,21 @@
 import { create } from "zustand";
 import {
   type OpenFile,
-  type FileNode,
   detectLanguage,
 } from "@/lib/mock-data";
 import { flushSettings } from "@/stores/settings-store";
 import { flushKeybindings } from "@/stores/keymap-store";
 import { TEMPLATE_DEFINITIONS, type DeploymentKind } from "@/templates";
 import type { Snapshot } from "@scelar/nodepod";
+import {
+  flushAllWorkspaceWrites,
+  flushWorkspaceBufferSnapshot,
+  forgetWorkspaceWrites,
+  queueWorkspaceWrite,
+  readWorkspaceFile,
+  saveWorkspaceFile,
+  writeWorkspaceFile,
+} from "@/lib/workspace-repository";
 
 export type TabType = "file" | "keymap" | "browser" | "ai";
 
@@ -217,35 +225,29 @@ function insertAtLeaf(
   });
 }
 
-function findNodeByPath(tree: FileNode[], path: string): FileNode | null {
-  for (const node of tree) {
-    if (node.path === path) return node;
-    if (node.children) {
-      const found = findNodeByPath(node.children, path);
-      if (found) return found;
-    }
-  }
-  return null;
-}
-
-function collectFilePaths(node: FileNode): string[] {
-  const result: string[] = [];
-  if (node.type === "file" && node.path) result.push(node.path);
-  if (node.children) {
-    for (const c of node.children) result.push(...collectFilePaths(c));
-  }
-  return result;
-}
-
 let _nodepodStoreCache: typeof import("@/stores/nodepod-store") | null = null;
 async function getNodepod() {
   if (!_nodepodStoreCache) _nodepodStoreCache = await import("@/stores/nodepod-store");
   return _nodepodStoreCache.useNodepodStore.getState().instance;
 }
 
-async function saveCurrentSnapshot() {
+async function refreshProjectIndex() {
+  if (!_nodepodStoreCache) _nodepodStoreCache = await import("@/stores/nodepod-store");
+  await _nodepodStoreCache.useNodepodStore.getState().refreshFileTree();
+}
+
+async function saveCurrentSnapshot(openFiles?: OpenFile[]) {
+  if (openFiles) await flushWorkspaceBufferSnapshot(openFiles);
+  else await flushAllWorkspaceWrites();
   if (!_nodepodStoreCache) _nodepodStoreCache = await import("@/stores/nodepod-store");
   await _nodepodStoreCache.useNodepodStore.getState().saveSnapshot();
+}
+
+function flushMountedEditorBuffers() {
+  if (typeof window === "undefined") return;
+  window.dispatchEvent(
+    new CustomEvent("wzed:editor-command", { detail: { command: "flush-all" } }),
+  );
 }
 
 function pushHistory(pane: PaneState, filePath: string): Pick<PaneState, "tabHistory" | "historyIndex"> {
@@ -271,7 +273,7 @@ interface WorkspaceState {
   splitLayout: SplitNode;
   openFiles: Record<string, OpenFile>;
 
-  projectFiles: FileNode[];
+  projectPaths: string[];
 
   paletteOpen: boolean;
   paletteInitialPrefix: string;
@@ -334,9 +336,8 @@ interface WorkspaceState {
   revealInProjectPanel: (filePath: string) => void;
   renameFile: (oldPath: string, newName: string) => void;
   moveNode: (nodePath: string, targetFolderPath: string | null) => void;
-  setProjectFiles: (files: FileNode[]) => void;
+  setProjectPaths: (paths: string[]) => void;
   updateFileContent: (filePath: string, content: string) => void;
-  markFileSaved: (filePath: string) => void;
   createFile: (name: string, parentPath: string | null) => void;
   createFolder: (name: string, parentPath: string | null) => void;
   deleteNode: (nodePath: string) => void;
@@ -347,6 +348,71 @@ interface WorkspaceState {
   deleteProject: (projectId: string) => void;
   renameProject: (projectId: string, newName: string) => void;
   hydrateProjects: () => void;
+}
+
+function isPathWithin(path: string, prefix: string): boolean {
+  return path === prefix || path.startsWith(`${prefix}/`);
+}
+
+function remapWorkspacePaths(
+  state: Pick<WorkspaceState, "openFiles" | "panes">,
+  oldPrefix: string,
+  newPrefix: string,
+): Pick<WorkspaceState, "openFiles" | "panes"> {
+  const openFiles = { ...state.openFiles };
+  for (const path of Object.keys(openFiles)) {
+    if (!isPathWithin(path, oldPrefix)) continue;
+    const nextPath = `${newPrefix}${path.slice(oldPrefix.length)}`;
+    const file = openFiles[path];
+    delete openFiles[path];
+    openFiles[nextPath] = {
+      ...file,
+      id: nextPath,
+      path: nextPath,
+      name: nextPath.split("/").at(-1) ?? file.name,
+    };
+  }
+
+  const panes: Record<string, PaneState> = {};
+  const remap = (path: string) => isPathWithin(path, oldPrefix)
+    ? `${newPrefix}${path.slice(oldPrefix.length)}`
+    : path;
+  for (const [paneId, pane] of Object.entries(state.panes)) {
+    panes[paneId] = {
+      ...pane,
+      tabs: pane.tabs.map(remap),
+      activeTab: remap(pane.activeTab),
+      tabHistory: pane.tabHistory.map(remap),
+    };
+  }
+  return { openFiles, panes };
+}
+
+async function flushDirtyFilesWithin(pathPrefix: string): Promise<void> {
+  const files = Object.values(useWorkspaceStore.getState().openFiles)
+    .filter((file) => file.modified && isPathWithin(file.path, pathPrefix));
+  await Promise.all(files.map((file) => saveWorkspaceFile(file.path)));
+}
+
+function removeWorkspacePaths(
+  state: Pick<WorkspaceState, "openFiles" | "panes">,
+  pathPrefix: string,
+): Pick<WorkspaceState, "openFiles" | "panes"> {
+  const openFiles = { ...state.openFiles };
+  for (const path of Object.keys(openFiles)) {
+    if (isPathWithin(path, pathPrefix)) delete openFiles[path];
+  }
+  const panes: Record<string, PaneState> = {};
+  for (const [paneId, pane] of Object.entries(state.panes)) {
+    const tabs = pane.tabs.filter((tab) => !isPathWithin(tab, pathPrefix));
+    panes[paneId] = {
+      ...pane,
+      tabs,
+      activeTab: isPathWithin(pane.activeTab, pathPrefix) ? tabs[0] ?? "" : pane.activeTab,
+      tabHistory: pane.tabHistory.filter((tab) => !isPathWithin(tab, pathPrefix)),
+    };
+  }
+  return { openFiles, panes };
 }
 
 const mainPaneId = "pane-1";
@@ -389,7 +455,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
   activePaneId: mainPaneId,
   splitLayout: { id: "root", type: "leaf", paneId: mainPaneId },
   openFiles: {},
-  projectFiles: [],
+  projectPaths: [],
   paletteOpen: false,
   paletteInitialPrefix: "",
   themePickerOpen: false,
@@ -403,7 +469,9 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
   dragState: null,
 
   openProject: (projectId) => {
+    flushMountedEditorBuffers();
     const s = get();
+    const previousOpenFiles = Object.values(s.openFiles);
     const hadProject = s.currentProject && !s.showHomeScreen;
     if (hadProject) {
       const pane = s.panes[s.activePaneId];
@@ -448,7 +516,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
     const gen = ++_bootGeneration;
     (async () => {
       try {
-        if (hadProject) await saveCurrentSnapshot();
+        if (hadProject) await saveCurrentSnapshot(previousOpenFiles);
         const { useNodepodStore } = await import("@/stores/nodepod-store");
         useNodepodStore.getState().teardown();
         if (gen !== _bootGeneration) return;
@@ -468,7 +536,9 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
   },
 
   openTemplate: (templateId) => {
+    flushMountedEditorBuffers();
     const s = get();
+    const previousOpenFiles = Object.values(s.openFiles);
     const hadProject = s.currentProject && !s.showHomeScreen;
     if (hadProject) {
       const pane = s.panes[s.activePaneId];
@@ -510,7 +580,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
     const gen = ++_bootGeneration;
     (async () => {
       try {
-        if (hadProject) await saveCurrentSnapshot();
+        if (hadProject) await saveCurrentSnapshot(previousOpenFiles);
         const { useNodepodStore } = await import("@/stores/nodepod-store");
         useNodepodStore.getState().teardown();
         if (gen !== _bootGeneration) return;
@@ -567,10 +637,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
     if (!isSpecialTab(filePath) && !s.openFiles[filePath]) {
       (async () => {
         try {
-          const { useNodepodStore } = await import("@/stores/nodepod-store");
-          const nodepod = useNodepodStore.getState().instance;
-          if (!nodepod) return;
-          const content = await nodepod.fs.readFile(filePath, "utf-8");
+          const content = await readWorkspaceFile(filePath);
           const name = filePath.split("/").pop() || filePath;
           const language = detectLanguage(name);
           set((prev) => ({
@@ -795,191 +862,159 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
   revealInProjectPanel: (_filePath) => set((s) => ({ leftDock: { ...s.leftDock, visible: true, activePanel: "project" } })),
 
   renameFile: (oldPath, newName) => {
-    const s = get();
     if (!newName || !oldPath) return;
     const oldName = oldPath.split("/").pop() || "";
     if (newName === oldName) return;
     const newPath = oldPath.slice(0, oldPath.lastIndexOf("/") + 1) + newName;
-    if (s.openFiles[newPath]) return;
-
-    const oldFile = s.openFiles[oldPath];
-    const newOpenFiles = { ...s.openFiles };
-    if (oldFile) { delete newOpenFiles[oldPath]; newOpenFiles[newPath] = { ...oldFile, name: newName, id: newPath, path: newPath }; }
-
-    const newPanes: Record<string, PaneState> = {};
-    for (const [pid, pane] of Object.entries(s.panes)) {
-      newPanes[pid] = { ...pane, tabs: pane.tabs.map(t => t === oldPath ? newPath : t), activeTab: pane.activeTab === oldPath ? newPath : pane.activeTab, tabHistory: pane.tabHistory.map(t => t === oldPath ? newPath : t) };
-    }
-
-    function updateChildPaths(nodes: FileNode[], parentPath: string): FileNode[] {
-      return nodes.map(n => { const p = `${parentPath}/${n.name}`; const u: FileNode = { ...n, path: p }; if (u.children) u.children = updateChildPaths(u.children, p); return u; });
-    }
-    function renameInTree(nodes: FileNode[]): FileNode[] {
-      return nodes.map(n => {
-        if (n.path === oldPath) { const u: FileNode = { ...n, name: newName, path: newPath }; if (u.children) u.children = updateChildPaths(u.children, newPath); return u; }
-        if (n.children) return { ...n, children: renameInTree(n.children) };
-        return n;
-      });
-    }
-
-    set({ openFiles: newOpenFiles, panes: newPanes, projectFiles: renameInTree(s.projectFiles) });
-
-    (async () => {
-      try { const nodepod = await getNodepod(); if (nodepod) await nodepod.fs.rename(oldPath, newPath); } catch (e) { console.error("Failed to rename in VFS:", e); }
+    void (async () => {
+      try {
+        const nodepod = await getNodepod();
+        if (!nodepod || await nodepod.fs.exists(newPath)) {
+          set((state) => ({ projectPaths: [...state.projectPaths] }));
+          return;
+        }
+        await flushDirtyFilesWithin(oldPath);
+        await nodepod.fs.rename(oldPath, newPath);
+        forgetWorkspaceWrites(oldPath);
+        set((state) => remapWorkspacePaths(state, oldPath, newPath));
+        await refreshProjectIndex();
+      } catch (error) {
+        console.error("Failed to rename in VFS:", error);
+        set((state) => ({ projectPaths: [...state.projectPaths] }));
+      }
     })();
   },
 
   moveNode: (nodePath, targetFolderPath) => {
-    const s = get();
     if (!nodePath) return;
     const nodeName = nodePath.split("/").pop() || "";
-
-    let found: FileNode | null = null;
-    function extractNode(nodes: FileNode[]): FileNode[] {
-      const result: FileNode[] = [];
-      for (const n of nodes) { if (n.path === nodePath) { found = n; continue; } if (n.children) result.push({ ...n, children: extractNode(n.children) }); else result.push(n); }
-      return result;
-    }
-    let newTree = extractNode(structuredClone(s.projectFiles));
-    if (!found) return;
-    const movedNode: FileNode = found;
-    if (movedNode.type === "folder" && movedNode.path === targetFolderPath) return;
-
     const destDir = targetFolderPath ?? "/project";
     const newNodePath = `${destDir}/${nodeName}`;
-
-    if (targetFolderPath === null) { if (newTree.some(n => n.name === nodeName)) return; }
-    else { const tn = findNodeByPath(newTree, targetFolderPath); if (tn?.children?.some(c => c.name === nodeName)) return; }
-
-    function updatePaths(node: FileNode, newParentPath: string): FileNode {
-      const p = `${newParentPath}/${node.name}`; const u: FileNode = { ...node, path: p }; if (u.children) u.children = u.children.map(c => updatePaths(c, p)); return u;
-    }
-    const updatedMovedNode = updatePaths(movedNode, destDir);
-
-    if (targetFolderPath === null) { newTree.push(updatedMovedNode); }
-    else {
-      function insertIntoFolder(nodes: FileNode[]): FileNode[] {
-        return nodes.map(n => { if (n.path === targetFolderPath && n.type === "folder") return { ...n, children: [...(n.children || []), updatedMovedNode] }; if (n.children) return { ...n, children: insertIntoFolder(n.children) }; return n; });
+    if (nodePath === newNodePath || (targetFolderPath && isPathWithin(targetFolderPath, nodePath))) return;
+    void (async () => {
+      try {
+        const nodepod = await getNodepod();
+        if (!nodepod || await nodepod.fs.exists(newNodePath)) {
+          set((state) => ({ projectPaths: [...state.projectPaths] }));
+          return;
+        }
+        await flushDirtyFilesWithin(nodePath);
+        await nodepod.fs.rename(nodePath, newNodePath);
+        forgetWorkspaceWrites(nodePath);
+        set((state) => remapWorkspacePaths(state, nodePath, newNodePath));
+        await refreshProjectIndex();
+      } catch (error) {
+        console.error("Failed to move in VFS:", error);
+        set((state) => ({ projectPaths: [...state.projectPaths] }));
       }
-      newTree = insertIntoFolder(newTree);
-    }
-
-    const newOpenFiles = { ...s.openFiles };
-    const oldPrefix = nodePath;
-    const newPrefix = newNodePath;
-    for (const key of Object.keys(newOpenFiles)) {
-      if (key === oldPrefix || key.startsWith(oldPrefix + "/")) {
-        const entry = newOpenFiles[key]; const updatedPath = newPrefix + key.slice(oldPrefix.length); delete newOpenFiles[key]; newOpenFiles[updatedPath] = { ...entry, path: updatedPath, id: updatedPath };
-      }
-    }
-
-    const newPanes: Record<string, PaneState> = {};
-    for (const [pid, pane] of Object.entries(s.panes)) {
-      const mapPath = (p: string) => { if (p === oldPrefix) return newPrefix; if (p.startsWith(oldPrefix + "/")) return newPrefix + p.slice(oldPrefix.length); return p; };
-      newPanes[pid] = { ...pane, tabs: pane.tabs.map(mapPath), activeTab: mapPath(pane.activeTab), tabHistory: pane.tabHistory.map(mapPath) };
-    }
-
-    set({ projectFiles: newTree, openFiles: newOpenFiles, panes: newPanes });
-
-    if (nodePath !== newNodePath) {
-      (async () => { try { const nodepod = await getNodepod(); if (nodepod) await nodepod.fs.rename(nodePath, newNodePath); } catch (e) { console.error("Failed to move in VFS:", e); } })();
-    }
+    })();
   },
 
-  setProjectFiles: (files) => set({ projectFiles: files }),
+  setProjectPaths: (paths) => set({ projectPaths: paths }),
 
-  updateFileContent: (filePath, content) =>
-    set((s) => { const file = s.openFiles[filePath]; if (!file) return s; return { openFiles: { ...s.openFiles, [filePath]: { ...file, content, modified: true } } }; }),
-
-  markFileSaved: (filePath) =>
-    set((s) => { const file = s.openFiles[filePath]; if (!file || !file.modified) return s; return { openFiles: { ...s.openFiles, [filePath]: { ...file, modified: false } } }; }),
+  updateFileContent: (filePath, content) => {
+    if (!get().openFiles[filePath]) return;
+    set((s) => { const file = s.openFiles[filePath]; if (!file) return s; return { openFiles: { ...s.openFiles, [filePath]: { ...file, content, modified: true } } }; });
+    queueWorkspaceWrite(filePath, content);
+  },
 
   createFile: (name, parentPath) => {
     const dir = parentPath ?? "/project";
     const fullPath = `${dir}/${name}`;
-    const newNode: FileNode = { name, type: "file", path: fullPath };
-    function insertNode(nodes: FileNode[]): FileNode[] {
-      if (parentPath === null) return [...nodes, newNode];
-      return nodes.map(n => { if (n.path === parentPath && n.type === "folder") return { ...n, children: [...(n.children || []), newNode] }; if (n.children) return { ...n, children: insertNode(n.children) }; return n; });
-    }
-    // pre-populate so openTab doesn't try to read a file that doesn't exist yet
-    const language = detectLanguage(name);
-    set((prev) => ({
-      projectFiles: insertNode(prev.projectFiles),
-      openFiles: { ...prev.openFiles, [fullPath]: { id: fullPath, name, path: fullPath, language, content: "" } },
-    }));
-    (async () => { try { const nodepod = await getNodepod(); if (!nodepod) return; await nodepod.fs.writeFile(fullPath, ""); } catch (e) { console.error("Failed to create file in VFS:", e); } })();
-    get().openTab(fullPath);
+    void (async () => {
+      try {
+        const nodepod = await getNodepod();
+        if (!nodepod || await nodepod.fs.exists(fullPath)) {
+          set((state) => ({ projectPaths: [...state.projectPaths] }));
+          return;
+        }
+        await writeWorkspaceFile(fullPath, "", { updateBuffer: false });
+        const language = detectLanguage(name);
+        set((state) => ({
+          openFiles: {
+            ...state.openFiles,
+            [fullPath]: { id: fullPath, name, path: fullPath, language, content: "" },
+          },
+        }));
+        get().openTab(fullPath);
+        await refreshProjectIndex();
+      } catch (error) {
+        console.error("Failed to create file in VFS:", error);
+        set((state) => ({ projectPaths: [...state.projectPaths] }));
+      }
+    })();
   },
 
   createFolder: (name, parentPath) => {
-    const s = get();
     const dir = parentPath ?? "/project";
     const fullPath = `${dir}/${name}`;
-    const newNode: FileNode = { name, type: "folder", path: fullPath, children: [] };
-    function insertNode(nodes: FileNode[]): FileNode[] {
-      if (parentPath === null) return [...nodes, newNode];
-      return nodes.map(n => { if (n.path === parentPath && n.type === "folder") return { ...n, children: [...(n.children || []), newNode] }; if (n.children) return { ...n, children: insertNode(n.children) }; return n; });
-    }
-    set({ projectFiles: insertNode(s.projectFiles) });
-    (async () => { try { const nodepod = await getNodepod(); if (!nodepod) return; await nodepod.fs.mkdir(fullPath); } catch (e) { console.error("Failed to create folder in VFS:", e); } })();
+    void (async () => {
+      try {
+        const nodepod = await getNodepod();
+        if (!nodepod || await nodepod.fs.exists(fullPath)) {
+          set((state) => ({ projectPaths: [...state.projectPaths] }));
+          return;
+        }
+        await nodepod.fs.mkdir(fullPath, { recursive: true });
+        await refreshProjectIndex();
+      } catch (error) {
+        console.error("Failed to create folder in VFS:", error);
+        set((state) => ({ projectPaths: [...state.projectPaths] }));
+      }
+    })();
   },
 
   deleteNode: (nodePath) => {
-    const s = get();
     if (!nodePath) return;
-    const node = findNodeByPath(s.projectFiles, nodePath);
-    if (!node) return;
-    const filesToClose = collectFilePaths(node);
-    function removeFromTree(nodes: FileNode[]): FileNode[] {
-      return nodes.filter(n => n.path !== nodePath).map(n => { if (n.children) return { ...n, children: removeFromTree(n.children) }; return n; });
-    }
-    const newOpenFiles = { ...s.openFiles };
-    for (const f of filesToClose) delete newOpenFiles[f];
-    const newPanes: Record<string, PaneState> = {};
-    for (const [pid, pane] of Object.entries(s.panes)) {
-      const newTabs = pane.tabs.filter(t => !filesToClose.includes(t));
-      const newActive = filesToClose.includes(pane.activeTab) ? newTabs[0] || "" : pane.activeTab;
-      newPanes[pid] = { ...pane, tabs: newTabs, activeTab: newActive };
-    }
-    set({ projectFiles: removeFromTree(s.projectFiles), openFiles: newOpenFiles, panes: newPanes });
-    (async () => {
+    void (async () => {
       try {
-        const nodepod = await getNodepod(); if (!nodepod) return;
+        const nodepod = await getNodepod();
+        if (!nodepod) return;
+        await flushDirtyFilesWithin(nodePath);
         const stat = await nodepod.fs.stat(nodePath);
         if (stat.isDirectory) await nodepod.fs.rmdir(nodePath, { recursive: true }); else await nodepod.fs.unlink(nodePath);
-      } catch (e) { console.error("Failed to delete from VFS:", e); }
+        forgetWorkspaceWrites(nodePath);
+        set((state) => removeWorkspacePaths(state, nodePath));
+        await refreshProjectIndex();
+      } catch (error) {
+        console.error("Failed to delete from VFS:", error);
+      }
     })();
   },
 
   duplicateFile: (filePath) => {
-    const s = get();
     if (!filePath) return;
     const parentDir = filePath.slice(0, filePath.lastIndexOf("/"));
     const fileName = filePath.split("/").pop() || "";
     const dotIdx = fileName.lastIndexOf(".");
     const baseName = dotIdx > 0 ? fileName.slice(0, dotIdx) : fileName;
     const ext = dotIdx > 0 ? fileName.slice(dotIdx) : "";
-    let newName = `${baseName} copy${ext}`;
-    let counter = 2;
-    const parentNode = findNodeByPath(s.projectFiles, parentDir);
-    const siblings = parentNode?.children ?? s.projectFiles;
-    while (siblings.some(n => n.name === newName)) { newName = `${baseName} copy ${counter}${ext}`; counter++; }
-    const newPath = `${parentDir}/${newName}`;
-    const newNode: FileNode = { name: newName, type: "file", path: newPath };
-    function insertAfter(nodes: FileNode[]): FileNode[] {
-      const result: FileNode[] = [];
-      for (const n of nodes) { result.push(n); if (n.path === filePath) result.push(newNode); if (n.children) { result[result.length - (n.path === filePath ? 2 : 1)] = { ...n, children: insertAfter(n.children) }; } }
-      return result;
-    }
-    const sourceContent = s.openFiles[filePath]?.content ?? "";
-    const language = detectLanguage(newName);
-    set((prev) => ({
-      projectFiles: insertAfter(prev.projectFiles),
-      openFiles: { ...prev.openFiles, [newPath]: { id: newPath, name: newName, path: newPath, language, content: sourceContent } },
-    }));
-    (async () => { try { const nodepod = await getNodepod(); if (!nodepod) return; const content = await nodepod.fs.readFile(filePath, "utf-8"); await nodepod.fs.writeFile(newPath, content ?? ""); } catch (e) { console.error("Failed to duplicate file in VFS:", e); } })();
-    get().openTab(newPath);
+    void (async () => {
+      try {
+        const nodepod = await getNodepod();
+        if (!nodepod) return;
+        let newName = `${baseName} copy${ext}`;
+        let newPath = `${parentDir}/${newName}`;
+        let counter = 2;
+        while (await nodepod.fs.exists(newPath)) {
+          newName = `${baseName} copy ${counter++}${ext}`;
+          newPath = `${parentDir}/${newName}`;
+        }
+        const content = get().openFiles[filePath]?.content ?? await nodepod.fs.readFile(filePath, "utf-8");
+        await writeWorkspaceFile(newPath, content, { updateBuffer: false });
+        const language = detectLanguage(newName);
+        set((state) => ({
+          openFiles: {
+            ...state.openFiles,
+            [newPath]: { id: newPath, name: newName, path: newPath, language, content },
+          },
+        }));
+        get().openTab(newPath);
+        await refreshProjectIndex();
+      } catch (error) {
+        console.error("Failed to duplicate file in VFS:", error);
+      }
+    })();
   },
 
   collapseAll: () => set((s) => ({ collapseCounter: s.collapseCounter + 1 })),
@@ -992,7 +1027,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
       activePaneId: mainPaneId,
       splitLayout: { id: "root", type: "leaf", paneId: mainPaneId },
       openFiles: {},
-      projectFiles: [],
+      projectPaths: [],
       maximizedPaneId: null,
       bottomDockMaximized: false,
       dragState: null,
@@ -1008,6 +1043,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
 
   importFromShare: (name, templateId, snapshot) => {
     const s = get();
+    const previousOpenFiles = Object.values(s.openFiles);
     const hadProject = s.currentProject && !s.showHomeScreen;
     if (hadProject) {
       const pane = s.panes[s.activePaneId];
@@ -1043,7 +1079,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
     const gen = ++_bootGeneration;
     (async () => {
       try {
-        if (hadProject) await saveCurrentSnapshot();
+        if (hadProject) await saveCurrentSnapshot(previousOpenFiles);
         const { useNodepodStore } = await import("@/stores/nodepod-store");
         useNodepodStore.getState().teardown();
         if (gen !== _bootGeneration) return;

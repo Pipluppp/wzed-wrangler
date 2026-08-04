@@ -1,45 +1,25 @@
 "use client";
-import { useState, useMemo, useRef, useCallback } from "react";
-import { cn } from "@/lib/cn";
-import { FileTree } from "./FileTree";
+import { useState, useRef, useCallback, useEffect } from "react";
+import { FileTree, type FileTreeHandle } from "./FileTree";
 import { useWorkspaceStore } from "@/stores/workspace-store";
 import { useNodepodStore } from "@/stores/nodepod-store";
-import { Search, FileUp, FolderUp, Loader2 } from "lucide-react";
-import type { FileNode } from "@/lib/mock-data";
-
-function filterTree(nodes: FileNode[], filter: string): FileNode[] {
-  const lower = filter.toLowerCase();
-  const result: FileNode[] = [];
-  for (const node of nodes) {
-    if (node.type === "folder") {
-      const filteredChildren = filterTree(node.children ?? [], filter);
-      // Keep folder if any child matches
-      if (filteredChildren.length > 0) {
-        result.push({ ...node, children: filteredChildren });
-      }
-    } else {
-      if (node.name.toLowerCase().includes(lower)) {
-        result.push(node);
-      }
-    }
-  }
-  return result;
-}
+import { FileUp, FolderUp, Loader2, Search } from "lucide-react";
+import { writeWorkspaceFile } from "@/lib/workspace-repository";
 
 export function ProjectPanel() {
-  const [filterText, setFilterText] = useState("");
-  const [showFilter, setShowFilter] = useState(false);
   const [importing, setImporting] = useState(false);
-  const projectFiles = useWorkspaceStore((s) => s.projectFiles);
+  const [treeSearchOpen, setTreeSearchOpen] = useState(false);
+  const projectPaths = useWorkspaceStore((s) => s.projectPaths);
   const instance = useNodepodStore((s) => s.instance);
+  const hydratingTree = useNodepodStore((s) => s.hydratingTree);
   const refreshFileTree = useNodepodStore((s) => s.refreshFileTree);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const folderInputRef = useRef<HTMLInputElement>(null);
+  const treeRef = useRef<FileTreeHandle>(null);
 
-  const filteredFiles = useMemo(() => {
-    if (!filterText.trim()) return projectFiles;
-    return filterTree(projectFiles, filterText.trim());
-  }, [projectFiles, filterText]);
+  useEffect(() => {
+    if (hydratingTree) setTreeSearchOpen(false);
+  }, [hydratingTree]);
 
   const handleImportFiles = useCallback(async (files: FileList | null) => {
     if (!files || !instance) return;
@@ -57,7 +37,7 @@ export function ProjectPanel() {
         }
 
         const content = await file.text();
-        await instance.fs.writeFile(targetPath, content);
+        await writeWorkspaceFile(targetPath, content, { updateBuffer: false });
 
         if ((i + 1) % 10 === 0) {
           await new Promise<void>((r) => setTimeout(r, 0));
@@ -111,37 +91,41 @@ export function ProjectPanel() {
             <FolderUp size={12} />
           </button>
           <button
-            onClick={() => setShowFilter(!showFilter)}
-            className={cn("p-1 rounded hover:bg-hover", showFilter ? "text-accent" : "text-t4 hover:text-t3")}
+            type="button"
+            onPointerDown={(event) => event.preventDefault()}
+            onClick={() => treeRef.current?.toggleSearch()}
+            className={`p-1 rounded hover:bg-hover ${treeSearchOpen ? "bg-hover text-accent" : "text-t4 hover:text-t3"}`}
+            title={treeSearchOpen ? "Hide file search" : "Search files"}
+            aria-label={treeSearchOpen ? "Hide file search" : "Search files"}
+            aria-pressed={treeSearchOpen}
           >
             <Search size={12} />
           </button>
         </div>
       </div>
 
-      {/* Filter input */}
-      {showFilter && (
-        <div className="px-2 py-1.5 border-b border-border">
-          <input
-            type="text"
-            value={filterText}
-            onChange={(e) => setFilterText(e.target.value)}
-            placeholder="Filter files..."
-            autoFocus
-            className="w-full bg-bg3 border border-border rounded px-2 py-1 text-[12px] text-t1 placeholder-t4 outline-none focus:border-focus"
-          />
-        </div>
-      )}
-
       {/* File tree */}
-      <div className="flex-1 overflow-y-auto overflow-x-hidden scrollbar-thin">
+      <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
         {importing && (
           <div className="flex items-center gap-2 px-3 py-2 text-[11px] text-t4 border-b border-border">
             <Loader2 size={12} className="animate-spin" />
             Importing files...
           </div>
         )}
-        <FileTree files={filteredFiles} />
+        <div className="min-h-0 flex-1">
+          {hydratingTree && projectPaths.length === 0 ? (
+            <div className="flex h-full items-center justify-center gap-2 text-[11px] text-t4">
+              <Loader2 size={12} className="animate-spin" />
+              Loading project files...
+            </div>
+          ) : (
+            <FileTree
+              ref={treeRef}
+              paths={projectPaths}
+              onSearchOpenChange={setTreeSearchOpen}
+            />
+          )}
+        </div>
       </div>
 
     </div>

@@ -5,6 +5,7 @@ import { useWorkspaceStore } from "@/stores/workspace-store";
 import { useSettingsStore } from "@/stores/settings-store";
 import { useShallow } from "zustand/react/shallow";
 import { getTheme, getMonacoThemeData } from "@/lib/themes";
+import { saveWorkspaceFile } from "@/lib/workspace-repository";
 
 const LANG_MAP: Record<string, string> = {
   rust: "rust",
@@ -420,48 +421,6 @@ function configureLanguageDefaults(monaco: any) {
   });
 }
 
-const writeTimers = new Map<string, ReturnType<typeof setTimeout>>();
-
-let _nodepodStorePromise: Promise<typeof import("@/stores/nodepod-store")> | null = null;
-function getNodepodStoreModule() {
-  if (!_nodepodStorePromise) {
-    _nodepodStorePromise = import("@/stores/nodepod-store");
-  }
-  return _nodepodStorePromise;
-}
-
-async function writeToVfs(path: string, fileName: string) {
-  const pending = writeTimers.get(path);
-  if (pending) { clearTimeout(pending); writeTimers.delete(path); }
-
-  try {
-    const { useNodepodStore } = await getNodepodStoreModule();
-    const nodepod = useNodepodStore.getState().instance;
-    if (nodepod) {
-      const file = useWorkspaceStore.getState().openFiles[fileName];
-      if (file) {
-        await nodepod.fs.writeFile(path, file.content);
-        useWorkspaceStore.getState().markFileSaved(fileName);
-      }
-    }
-  } catch (e) {
-    console.error("Failed to write file to VFS:", path, e);
-  }
-}
-
-function debouncedWriteToVfs(path: string, fileName: string) {
-  const existing = writeTimers.get(path);
-  if (existing) clearTimeout(existing);
-
-  writeTimers.set(
-    path,
-    setTimeout(() => {
-      writeTimers.delete(path);
-      writeToVfs(path, fileName);
-    }, 300)
-  );
-}
-
 let _cachedEditorOptions: ReturnType<typeof buildEditorOptions> | null = null;
 let _cachedSettingsKey = "";
 
@@ -656,9 +615,6 @@ export const CodeEditor = memo(function CodeEditor({ paneId }: CodeEditorProps) 
         const model = editor?.getModel?.();
         const latest = model ? model.getValue() : value;
         updateFileContent(tab, latest);
-        if (settingsRef.current.auto_save === "afterDelay" && fileRef.current?.path) {
-          debouncedWriteToVfs(fileRef.current.path, tab);
-        }
       }, 50);
     },
     [updateFileContent]
@@ -685,8 +641,14 @@ export const CodeEditor = memo(function CodeEditor({ paneId }: CodeEditorProps) 
       const ws = useWorkspaceStore.getState();
       const p = ws.panes[paneId];
       if (!p) return;
-      const f = ws.openFiles[p.activeTab];
-      if (f?.modified && f.path) writeToVfs(f.path, p.activeTab);
+      const model = editor.getModel();
+      if (model && p.activeTab) ws.updateFileContent(p.activeTab, model.getValue());
+      const f = useWorkspaceStore.getState().openFiles[p.activeTab];
+      if (f?.modified && f.path) {
+        void saveWorkspaceFile(p.activeTab).catch((error) => {
+          console.error("Failed to save file on focus change:", f.path, error);
+        });
+      }
     });
     return () => disposable.dispose();
   }, [settings.auto_save, paneId]);
@@ -697,6 +659,34 @@ export const CodeEditor = memo(function CodeEditor({ paneId }: CodeEditorProps) 
       currentModelPathRef.current = "";
     };
   }, []);
+
+  useEffect(() => {
+    const handleCommand = (event: Event) => {
+      const detail = (event as CustomEvent<{ command?: string; lineNumber?: number }>).detail;
+      const command = detail?.command;
+      const workspace = useWorkspaceStore.getState();
+      if (command === "flush-all" || command === "flush") {
+        if (command === "flush" && workspace.activePaneId !== paneId) return;
+        const tab = workspace.panes[paneId]?.activeTab;
+        const model = editorRef.current?.getModel?.();
+        if (tab && model) workspace.updateFileContent(tab, model.getValue());
+        return;
+      }
+      if (workspace.activePaneId !== paneId) return;
+      const editor = editorRef.current;
+      if (!editor) return;
+      if (command === "focus") editor.focus();
+      else if (command === "undo") editor.trigger("wzed", "undo", null);
+      else if (command === "redo") editor.trigger("wzed", "redo", null);
+      else if (command === "go-to-line" && detail.lineNumber) {
+        editor.setPosition({ lineNumber: detail.lineNumber, column: 1 });
+        editor.revealLineInCenter(detail.lineNumber);
+        editor.focus();
+      }
+    };
+    window.addEventListener("wzed:editor-command", handleCommand);
+    return () => window.removeEventListener("wzed:editor-command", handleCommand);
+  }, [paneId]);
 
   const handleMount: OnMount = (editor, monaco) => {
     editorRef.current = editor;
@@ -741,7 +731,13 @@ export const CodeEditor = memo(function CodeEditor({ paneId }: CodeEditorProps) 
         const p = ws.panes[paneId];
         if (!p) return;
         const fl = ws.openFiles[p.activeTab];
-        if (fl?.path) writeToVfs(fl.path, p.activeTab);
+        const model = editor.getModel();
+        if (model && p.activeTab) ws.updateFileContent(p.activeTab, model.getValue());
+        if (fl?.path) {
+          void saveWorkspaceFile(p.activeTab).catch((error) => {
+            console.error("Failed to save file:", fl.path, error);
+          });
+        }
       },
     });
 

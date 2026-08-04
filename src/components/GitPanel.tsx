@@ -20,6 +20,7 @@ import {
 import { useNodepodStore } from "@/stores/nodepod-store";
 import { useSettingsStore } from "@/stores/settings-store";
 import { useWorkspaceStore } from "@/stores/workspace-store";
+import { refreshRepositoryStatus, useRepositoryStatusStore } from "@/stores/repository-status-store";
 
 interface GitFileChange {
   path: string;
@@ -88,35 +89,30 @@ export function GitPanel() {
     if (!instance) return;
     try {
       const { exitCode } = await gitExec(instance, ["rev-parse", "--is-inside-work-tree"]);
-      if (exitCode !== 0) { setIsRepo(false); return; }
+      if (exitCode !== 0) {
+        setIsRepo(false);
+        useRepositoryStatusStore.getState().clear();
+        return;
+      }
       setIsRepo(true);
 
       // Branch
       const branchResult = await gitExec(instance, ["branch", "--show-current"]);
       setBranch(branchResult.stdout.trim() || "HEAD (detached)");
 
-      const statusResult = await gitExec(instance, ["status", "--porcelain"]);
-      const staged: GitFileChange[] = [];
-      const unstaged: GitFileChange[] = [];
-
-      for (const line of statusResult.stdout.split("\n")) {
-        if (!line.trim()) continue;
-        const x = line[0]; // index status
-        const y = line[1]; // worktree status
-        const filePath = line.slice(3).trim();
-
-        if (x !== " " && x !== "?") {
-          staged.push({ path: filePath, status: x, staged: true });
-        }
-        if (y !== " " || x === "?") {
-          unstaged.push({ path: filePath, status: x === "?" ? "?" : y, staged: false });
-        }
-      }
+      const changes = await refreshRepositoryStatus(instance);
+      const staged: GitFileChange[] = changes
+        .filter((change) => change.scope === "staged")
+        .map((change) => ({ path: change.path, status: change.status, staged: true }));
+      const unstaged: GitFileChange[] = changes
+        .filter((change) => change.scope === "working")
+        .map((change) => ({ path: change.path, status: change.status, staged: false }));
 
       setStagedFiles(staged);
       setUnstagedFiles(unstaged);
     } catch {
       setIsRepo(false);
+      useRepositoryStatusStore.getState().clear();
     }
   }, [instance]);
 

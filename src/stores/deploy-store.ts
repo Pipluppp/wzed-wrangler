@@ -6,6 +6,7 @@ import {
 import { useNodepodStore } from "@/stores/nodepod-store";
 import { useWorkspaceStore } from "@/stores/workspace-store";
 import { getTemplateDefinition } from "@/templates";
+import { flushAllWorkspaceWrites } from "@/lib/workspace-repository";
 
 export type DeployPhase =
   | "idle"
@@ -82,11 +83,7 @@ export const useDeployStore = create<DeployState>((set, get) => ({
     set({ phase: "installing", output: "", error: null });
 
     try {
-      for (const file of Object.values(workspace.openFiles)) {
-        if (!file.modified) continue;
-        await nodepodState.instance.fs.writeFile(file.path, file.content);
-        useWorkspaceStore.getState().markFileSaved(file.path);
-      }
+      await flushAllWorkspaceWrites();
 
       const result = await deployTemporaryPreview(nodepodState.instance, {
         kind: template.deploymentKind,

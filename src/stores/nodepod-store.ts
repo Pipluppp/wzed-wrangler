@@ -1,9 +1,10 @@
 import { create } from "zustand";
-import type { FileNode } from "@/lib/mock-data";
 import { useWorkspaceStore } from "@/stores/workspace-store";
 import { saveProjectSnapshot, loadProjectSnapshot } from "@/lib/snapshot-db";
 import { getTemplateDefinition } from "@/templates";
 import type { Nodepod, NodepodFS, Snapshot } from "@scelar/nodepod";
+import { forgetWorkspaceWrites, reconcileOpenFilesFromVfs } from "@/lib/workspace-repository";
+import { refreshRepositoryStatus, useRepositoryStatusStore } from "@/stores/repository-status-store";
 
 type NodepodInstance = Nodepod;
 type NodepodFSInstance = NodepodFS;
@@ -11,20 +12,9 @@ type NodepodFSInstance = NodepodFS;
 let _vfsWatcher: { close(): void } | null = null;
 let _refreshTimer: ReturnType<typeof setTimeout> | null = null;
 let _snapshotTimer: ReturnType<typeof setTimeout> | null = null;
+let _repositoryRefreshTimer: ReturnType<typeof setTimeout> | null = null;
 let _lastTreeHash = "";
 
-// quick hash of the tree structure so we can skip no-op updates
-function treeFingerprint(nodes: FileNode[]): string {
-  const parts: string[] = [];
-  function walk(ns: FileNode[]) {
-    for (const n of ns) {
-      parts.push(n.type === "folder" ? `d:${n.path}` : `f:${n.path}`);
-      if (n.children) walk(n.children);
-    }
-  }
-  walk(nodes);
-  return parts.join("\n");
-}
 let _nodepodModuleCache: typeof import("@scelar/nodepod") | null = null;
 
 let _vfsDirty = false;
@@ -62,6 +52,7 @@ interface NodepodState {
   instance: NodepodInstance | null;
   runtimeId: string | null;
   booting: boolean;
+  hydratingTree: boolean;
   error: string | null;
   serverPorts: Map<number, string>;
   startupCommand: string | null;
@@ -77,10 +68,11 @@ interface NodepodState {
   showExternalPreview: (url: string) => void;
 }
 
-async function vfsToFileNodes(
+async function vfsToProjectPaths(
   fs: NodepodFSInstance,
   dirPath: string,
-): Promise<FileNode[]> {
+  relativeParent = "",
+): Promise<string[]> {
   let entries: string[];
   try {
     entries = await fs.readdir(dirPath);
@@ -88,11 +80,12 @@ async function vfsToFileNodes(
     return [];
   }
 
-  const folders: FileNode[] = [];
-  const files: FileNode[] = [];
+  const folders: string[] = [];
+  const files: string[] = [];
   for (const name of entries.sort()) {
     if (
       name === "node_modules" ||
+      name === ".git" ||
       name === ".cache" ||
       name === ".npm" ||
       name === ".wzed" ||
@@ -105,21 +98,52 @@ async function vfsToFileNodes(
       : `${dirPath}/${name}`;
     try {
       const stat = await fs.stat(fullPath);
+      const relativePath = relativeParent ? `${relativeParent}/${name}` : name;
       if (stat.isDirectory) {
-        const children = await vfsToFileNodes(fs, fullPath);
-        folders.push({ name, type: "folder", path: fullPath, children });
+        folders.push(`${relativePath}/`);
+        folders.push(...await vfsToProjectPaths(fs, fullPath, relativePath));
       } else {
-        files.push({ name, type: "file", path: fullPath });
+        files.push(relativePath);
       }
     } catch { /* skip */ }
   }
   return [...folders, ...files];
 }
 
+async function publishProjectPaths(instance: NodepodInstance): Promise<string[]> {
+  const paths = await vfsToProjectPaths(instance.fs, "/project");
+  if (useNodepodStore.getState().instance !== instance) return [];
+
+  const hash = paths.join("\n");
+  if (hash !== _lastTreeHash) {
+    _lastTreeHash = hash;
+    useWorkspaceStore.getState().setProjectPaths(paths);
+  }
+  return paths;
+}
+
+function scheduleRepositoryRefresh(instance: NodepodInstance): void {
+  if (_repositoryRefreshTimer) clearTimeout(_repositoryRefreshTimer);
+  _repositoryRefreshTimer = setTimeout(() => {
+    _repositoryRefreshTimer = null;
+    if (useNodepodStore.getState().instance !== instance) return;
+
+    // Neither task is required to display the explorer. Keep them off the
+    // initial tree-loading path and coalesce VFS event bursts from npm/Git.
+    void Promise.all([
+      reconcileOpenFilesFromVfs(),
+      refreshRepositoryStatus(instance),
+    ]).catch((error) => {
+      console.error("Failed to reconcile repository state:", error);
+    });
+  }, 250);
+}
+
 export const useNodepodStore = create<NodepodState>((set, get) => ({
   instance: null,
   runtimeId: null,
   booting: false,
+  hydratingTree: false,
   error: null,
   serverPorts: new Map(),
   startupCommand: null,
@@ -135,6 +159,7 @@ export const useNodepodStore = create<NodepodState>((set, get) => ({
 
     set({
       booting: true,
+      hydratingTree: true,
       error: null,
       instance: null,
       runtimeId: null,
@@ -196,8 +221,6 @@ export const useNodepodStore = create<NodepodState>((set, get) => ({
         }
       }
 
-      await get().refreshFileTree();
-
       if (_vfsWatcher) {
         _vfsWatcher.close();
         _vfsWatcher = null;
@@ -216,8 +239,32 @@ export const useNodepodStore = create<NodepodState>((set, get) => ({
           if (_vfsDirty) get().saveSnapshot();
         }, 30_000);
       });
+
+      // Force the first VFS snapshot into the workspace even when the previous
+      // model was also empty. Keep the tree in its loading state until Nodepod
+      // has made template files visible, retrying briefly for browser/VFS
+      // hydration that completes just after boot resolves.
+      _lastTreeHash = "\0";
+      const expectsProjectFiles = Object.keys(files).some((path) =>
+        path === "/project" || path.startsWith("/project/"),
+      );
+      for (let attempt = 0; attempt < 4; attempt++) {
+        const paths = await publishProjectPaths(instance);
+        if (!expectsProjectFiles || paths.length > 0) break;
+        // The watcher remains the long-tail fallback. Avoid sleeping after the
+        // final probe and keep the active polling window short (350 ms total).
+        if (attempt < 3) {
+          await new Promise<void>((resolve) => setTimeout(resolve, 50 * 2 ** attempt));
+        }
+      }
+      scheduleRepositoryRefresh(instance);
+      set({ hydratingTree: false });
     } catch (e: any) {
-      set({ error: e?.message || "Failed to boot nodepod", booting: false });
+      set({
+        error: e?.message || "Failed to boot nodepod",
+        booting: false,
+        hydratingTree: false,
+      });
       console.error("Nodepod boot error:", e);
     }
   },
@@ -235,6 +282,10 @@ export const useNodepodStore = create<NodepodState>((set, get) => ({
       clearTimeout(_refreshTimer);
       _refreshTimer = null;
     }
+    if (_repositoryRefreshTimer) {
+      clearTimeout(_repositoryRefreshTimer);
+      _repositoryRefreshTimer = null;
+    }
     const instance = get().instance;
     if (instance) {
       try {
@@ -246,6 +297,8 @@ export const useNodepodStore = create<NodepodState>((set, get) => ({
     _vfsDirty = false;
     _cachedSnapshot = null;
     _lastTreeHash = "";
+    forgetWorkspaceWrites();
+    useRepositoryStatusStore.getState().clear();
     set({
       instance: null,
       runtimeId: null,
@@ -254,6 +307,7 @@ export const useNodepodStore = create<NodepodState>((set, get) => ({
       externalPreviewUrl: null,
       error: null,
       dirty: false,
+      hydratingTree: false,
     });
   },
 
@@ -262,11 +316,8 @@ export const useNodepodStore = create<NodepodState>((set, get) => ({
     if (!instance) return;
 
     try {
-      const tree = await vfsToFileNodes(instance.fs, "/project");
-      const hash = treeFingerprint(tree);
-      if (hash === _lastTreeHash) return;
-      _lastTreeHash = hash;
-      useWorkspaceStore.getState().setProjectFiles(tree);
+      await publishProjectPaths(instance);
+      scheduleRepositoryRefresh(instance);
     } catch (e) {
       console.error("Failed to refresh file tree:", e);
     }

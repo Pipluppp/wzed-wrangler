@@ -1,7 +1,7 @@
 "use client";
 import { useState, useEffect, useRef, useMemo, useCallback } from "react";
 import { cn } from "@/lib/cn";
-import { COMMANDS, type FileNode } from "@/lib/mock-data";
+import { COMMANDS } from "@/lib/mock-data";
 import { useWorkspaceStore } from "@/stores/workspace-store";
 import { executeAction } from "@/lib/keybind-dispatcher";
 import { useShallow } from "zustand/react/shallow";
@@ -62,21 +62,21 @@ const EDITOR_SHORTCUTS: Record<string, { key: string; ctrl?: boolean; shift?: bo
 
 function triggerEditorShortcut(opts: { key: string; ctrl?: boolean; shift?: boolean; alt?: boolean }) {
   setTimeout(() => {
-    const ta = document.querySelector(".monaco-editor textarea") as HTMLTextAreaElement | null;
-    if (ta) {
-      ta.focus();
-      setTimeout(() => {
-        ta.dispatchEvent(new KeyboardEvent("keydown", {
-          key: opts.key,
-          code: opts.key.length === 1 ? `Key${opts.key.toUpperCase()}` : opts.key,
-          ctrlKey: opts.ctrl ?? false,
-          shiftKey: opts.shift ?? false,
-          altKey: opts.alt ?? false,
-          bubbles: true,
-          cancelable: true,
-        }));
-      }, 16);
-    }
+    const textarea = document.querySelector(".monaco-editor textarea") as HTMLTextAreaElement | null;
+    if (!textarea) return;
+    textarea.focus();
+    setTimeout(() => {
+      textarea.dispatchEvent(new KeyboardEvent("keydown", {
+        key: opts.key,
+        code: opts.key.length === 1 ? `Key${opts.key.toUpperCase()}` : opts.key,
+        ctrlKey: opts.ctrl ?? false,
+        metaKey: opts.ctrl ?? false,
+        shiftKey: opts.shift ?? false,
+        altKey: opts.alt ?? false,
+        bubbles: true,
+        cancelable: true,
+      }));
+    }, 16);
   }, 60);
 }
 
@@ -174,18 +174,15 @@ function detectMode(raw: string): { mode: PaletteMode; query: string } {
 
 // --- file helpers ---
 
-function flattenFiles(nodes: FileNode[], parentPath = ""): { name: string; dir: string; path: string }[] {
-  const result: { name: string; dir: string; path: string }[] = [];
-  for (const node of nodes) {
-    const relPath = parentPath ? `${parentPath}/${node.name}` : node.name;
-    if (node.type === "file") {
-      result.push({ name: node.name, dir: parentPath ? `${parentPath}/` : "", path: node.path || `/project/${relPath}` });
-    }
-    if (node.children) {
-      result.push(...flattenFiles(node.children, relPath));
-    }
-  }
-  return result;
+function filesFromProjectPaths(paths: readonly string[]): { name: string; dir: string; path: string }[] {
+  return paths.filter((path) => !path.endsWith("/")).map((path) => {
+    const separator = path.lastIndexOf("/");
+    return {
+      name: separator === -1 ? path : path.slice(separator + 1),
+      dir: separator === -1 ? "" : `${path.slice(0, separator)}/`,
+      path: `/project/${path}`,
+    };
+  });
 }
 
 // --- scored item types ---
@@ -363,7 +360,7 @@ export function CommandPalette() {
   const closePalette = useWorkspaceStore((s) => s.closePalette);
   const openTab = useWorkspaceStore((s) => s.openTab);
   const openFilePaths = useWorkspaceStore(useShallow((s) => Object.keys(s.openFiles)));
-  const projectFiles = useWorkspaceStore((s) => s.projectFiles);
+  const projectPaths = useWorkspaceStore((s) => s.projectPaths);
 
   const [rawInput, setRawInput] = useState("");
   const [selectedIndex, setSelectedIndex] = useState(0);
@@ -372,7 +369,7 @@ export function CommandPalette() {
 
   const { mode, query } = useMemo(() => detectMode(rawInput), [rawInput]);
 
-  const allProjectFiles = useMemo(() => flattenFiles(projectFiles), [projectFiles]);
+  const allProjectFiles = useMemo(() => filesFromProjectPaths(projectPaths), [projectPaths]);
   const recentPaths = useMemo(() => new Set(openFilePaths), [openFilePaths]);
 
   // build groups based on mode
@@ -444,15 +441,9 @@ export function CommandPalette() {
       recordUsage(`file:${item.path}`);
       openTab(item.path);
     } else if (item.kind === "goto-line") {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const editor = (window as any).monaco as { editor?: { getEditors?: () => Array<{ setPosition: (p: { lineNumber: number; column: number }) => void; revealLineInCenter: (n: number) => void; focus: () => void }> } } | undefined;
-      const editors = editor?.editor?.getEditors?.();
-      if (editors?.[0]) {
-        const ed = editors[0];
-        ed.setPosition({ lineNumber: item.lineNumber, column: 1 });
-        ed.revealLineInCenter(item.lineNumber);
-        ed.focus();
-      }
+      window.dispatchEvent(new CustomEvent("wzed:editor-command", {
+        detail: { command: "go-to-line", lineNumber: item.lineNumber },
+      }));
     }
   }, [closePalette, openTab]);
 

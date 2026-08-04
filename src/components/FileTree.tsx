@@ -1,511 +1,322 @@
 "use client";
-import { useState, useCallback, useRef, useEffect, memo } from "react";
-import { cn } from "@/lib/cn";
-import { FileIcon, FolderIcon } from "./ui/FileIcon";
-import { ChevronRight, ChevronDown } from "lucide-react";
-import type { FileNode } from "@/lib/mock-data";
-import { useWorkspaceStore } from "@/stores/workspace-store";
-import { ContextMenu, type ContextMenuSection } from "./ui/ContextMenu";
 
-interface ContextMenuState {
-  x: number;
-  y: number;
-  sections: ContextMenuSection[];
+import {
+  forwardRef,
+  useCallback,
+  useEffect,
+  useImperativeHandle,
+  useMemo,
+  useRef,
+  type CSSProperties,
+} from "react";
+import {
+  FileTree as PierreFileTree,
+  useFileTree,
+  useFileTreeSearch,
+} from "@pierre/trees/react";
+import type {
+  ContextMenuItem as PierreContextMenuItem,
+  ContextMenuOpenContext,
+  FileTreeDirectoryHandle,
+  FileTreeDropResult,
+} from "@pierre/trees";
+import {
+  toTreePath,
+  toVfsPath,
+  treeBasename,
+  treeParentPath,
+} from "@/lib/trees-paths";
+import { useWorkspaceStore } from "@/stores/workspace-store";
+import { useRepositoryStatusStore } from "@/stores/repository-status-store";
+import type { ContextMenuSection } from "./ui/ContextMenu";
+
+interface PendingCreate {
+  type: "file" | "folder";
+  parentPath: string | null;
+  sourcePath: string;
 }
+
+interface FileTreeProps {
+  paths: readonly string[];
+  onSearchOpenChange?: (isOpen: boolean) => void;
+}
+
+export interface FileTreeHandle {
+  toggleSearch: () => void;
+}
+
+const TREE_CSS = `
+  :host { color-scheme: inherit; }
+  [data-file-tree-search-container][data-open='false'] { display: none; }
+  button[data-type='item'] { border-radius: 0; }
+  button[data-type='item']:hover { background: var(--hover); }
+`;
+
+const TREE_STYLE = {
+  height: "100%",
+  width: "100%",
+  minHeight: 0,
+  "--trees-bg-override": "transparent",
+  "--trees-bg-muted-override": "var(--bg1)",
+  "--trees-fg-override": "var(--text3)",
+  "--trees-fg-muted-override": "var(--text4)",
+  "--trees-selected-bg-override": "var(--hover)",
+  "--trees-border-color-override": "var(--border)",
+  "--trees-accent-override": "var(--accent)",
+  "--trees-focus-ring-color-override": "var(--focus)",
+  "--trees-font-family-override": "inherit",
+  "--trees-font-size-override": "13px",
+  "--trees-git-added-color-override": "var(--added)",
+  "--trees-git-modified-color-override": "var(--modified)",
+  "--trees-git-deleted-color-override": "var(--deleted)",
+  "--trees-git-untracked-color-override": "var(--added)",
+} as CSSProperties;
 
 function copyToClipboard(text: string) {
   navigator.clipboard.writeText(text).catch(() => {});
 }
 
-interface FileMenuActions {
-  openTab: (filePath: string) => void;
-  openSearch: () => void;
-  openTerminal: () => void;
-  startRename: (nodePath: string) => void;
-  deleteNode: (nodePath: string) => void;
-  duplicateFile: (filePath: string) => void;
-  createFile: (parentPath: string | null) => void;
-  createFolder: (parentPath: string | null) => void;
-  collapseAll: () => void;
-}
-
-function getFileContextMenu(node: FileNode, actions: FileMenuActions, parentPath: string | null): ContextMenuSection[] {
-  const nodePath = node.path!;
-  return [
-    { items: [{ label: "Open", onClick: () => actions.openTab(nodePath) }] },
-    { items: [
-      { label: "New File...", onClick: () => actions.createFile(parentPath) },
-      { label: "New Folder...", onClick: () => actions.createFolder(parentPath) },
-    ] },
-    { items: [
-      { label: "Duplicate", onClick: () => actions.duplicateFile(nodePath) },
-      { label: "Rename", shortcut: "F2", onClick: () => actions.startRename(nodePath) },
-    ] },
-    { items: [
-      { label: "Copy Name", onClick: () => copyToClipboard(node.name) },
-      { label: "Copy Path", shortcut: "Alt-Shift-C", onClick: () => copyToClipboard(nodePath) },
-    ] },
-    { items: [
-      { label: "Find in Folder", shortcut: "Alt-Shift-F", onClick: actions.openSearch },
-      { label: "Open in Terminal", onClick: actions.openTerminal },
-    ] },
-    { items: [{ label: "Delete", shortcut: "Del", onClick: () => actions.deleteNode(nodePath) }] },
-  ];
-}
-
-function getFolderContextMenu(node: FileNode, actions: FileMenuActions): ContextMenuSection[] {
-  const nodePath = node.path!;
-  return [
-    { items: [
-      { label: "New File...", onClick: () => actions.createFile(nodePath) },
-      { label: "New Folder...", onClick: () => actions.createFolder(nodePath) },
-    ] },
-    { items: [{ label: "Rename", shortcut: "F2", onClick: () => actions.startRename(nodePath) }] },
-    { items: [{ label: "Copy Name", onClick: () => copyToClipboard(node.name) }] },
-    { items: [
-      { label: "Find in Folder", shortcut: "Alt-Shift-F", onClick: actions.openSearch },
-      { label: "Open in Terminal", onClick: actions.openTerminal },
-    ] },
-    { items: [{ label: "Collapse All", onClick: actions.collapseAll }] },
-    { items: [{ label: "Delete", shortcut: "Del", onClick: () => actions.deleteNode(nodePath) }] },
-  ];
-}
-
-function getBackgroundContextMenu(actions: FileMenuActions): ContextMenuSection[] {
-  return [
-    { items: [
-      { label: "New File...", onClick: () => actions.createFile(null) },
-      { label: "New Folder...", onClick: () => actions.createFolder(null) },
-    ] },
-    { items: [{ label: "Collapse All", onClick: actions.collapseAll }] },
-  ];
-}
-
-function InlineRenameInput({ name, onCommit, onCancel }: { name: string; onCommit: (newName: string) => void; onCancel: () => void }) {
-  const [value, setValue] = useState(name);
-  const inputRef = useRef<HTMLInputElement>(null);
-
-  useEffect(() => {
-    const el = inputRef.current;
-    if (!el) return;
-    el.focus();
-    const dotIdx = name.lastIndexOf(".");
-    el.setSelectionRange(0, dotIdx > 0 ? dotIdx : name.length);
-  }, [name]);
-
-  const commit = () => {
-    const trimmed = value.trim();
-    if (trimmed && trimmed !== name) {
-      onCommit(trimmed);
-    } else {
-      onCancel();
-    }
+function TreeContextMenu({
+  sections,
+  context,
+}: {
+  sections: ContextMenuSection[];
+  context: ContextMenuOpenContext;
+}) {
+  const run = (action?: () => void) => {
+    context.close({ restoreFocus: false });
+    action?.();
   };
 
   return (
-    <input
-      ref={inputRef}
-      value={value}
-      onChange={(e) => setValue(e.target.value)}
-      onKeyDown={(e) => {
-        if (e.key === "Enter") { e.preventDefault(); commit(); }
-        if (e.key === "Escape") { e.preventDefault(); onCancel(); }
-        e.stopPropagation();
-      }}
-      onBlur={commit}
-      onClick={(e) => e.stopPropagation()}
-      className="bg-bg0 border border-focus rounded px-1 py-0 text-[13px] text-t1 outline-none w-full min-w-0"
-    />
-  );
-}
-
-function InlineCreateInput({ placeholder, onCommit, onCancel }: { placeholder: string; onCommit: (name: string) => void; onCancel: () => void }) {
-  const [value, setValue] = useState("");
-  const inputRef = useRef<HTMLInputElement>(null);
-
-  useEffect(() => {
-    inputRef.current?.focus();
-  }, []);
-
-  const commit = () => {
-    const trimmed = value.trim();
-    if (trimmed) {
-      onCommit(trimmed);
-    } else {
-      onCancel();
-    }
-  };
-
-  return (
-    <input
-      ref={inputRef}
-      value={value}
-      placeholder={placeholder}
-      onChange={(e) => setValue(e.target.value)}
-      onKeyDown={(e) => {
-        if (e.key === "Enter") { e.preventDefault(); commit(); }
-        if (e.key === "Escape") { e.preventDefault(); onCancel(); }
-        e.stopPropagation();
-      }}
-      onBlur={commit}
-      onClick={(e) => e.stopPropagation()}
-      className="bg-bg0 border border-focus rounded px-1 py-0 text-[13px] text-t1 outline-none w-full min-w-0"
-    />
-  );
-}
-
-// Drop position: "into" a folder, or "above"/"below" for reordering at the same level
-type TreeDropPosition = "above" | "below" | "into" | null;
-
-const TREE_DND_TYPE = "application/wzed-tree-node";
-
-interface CreatingState {
-  type: "file" | "folder";
-  parentPath: string | null;  // full VFS path of parent folder, or null for root
-}
-
-interface FileTreeItemProps {
-  node: FileNode;
-  depth?: number;
-  defaultOpen?: boolean;
-  onContextMenu: (e: React.MouseEvent, node: FileNode, parentPath: string | null) => void;
-  renamingPath: string | null;
-  onRenameCommit: (oldPath: string, newName: string) => void;
-  onRenameCancel: () => void;
-  parentPath: string | null;
-  creating: CreatingState | null;
-  onCreateCommit: (name: string) => void;
-  onCreateCancel: () => void;
-  forceCollapsed: number;
-}
-
-const FileTreeItem = memo(function FileTreeItem({ node, depth = 0, defaultOpen, onContextMenu, renamingPath, onRenameCommit, onRenameCancel, parentPath, creating, onCreateCommit, onCreateCancel, forceCollapsed }: FileTreeItemProps) {
-  const [isOpen, setIsOpen] = useState(defaultOpen ?? false);
-  const openTab = useWorkspaceStore((s) => s.openTab);
-  const moveNode = useWorkspaceStore((s) => s.moveNode);
-  // Narrow selector: only subscribe to the active file path, not the entire panes object
-  const activeFilePath = useWorkspaceStore((s) => {
-    const pane = s.panes[s.activePaneId];
-    return pane?.activeTab ?? "";
-  });
-  const rowRef = useRef<HTMLDivElement>(null);
-  const [dropPos, setDropPos] = useState<TreeDropPosition>(null);
-
-  const nodePath = node.path!;
-
-  // Collapse when forceCollapsed counter changes
-  useEffect(() => {
-    if (forceCollapsed > 0) setIsOpen(false);
-  }, [forceCollapsed]);
-
-  // Auto-expand when creating inside this folder
-  useEffect(() => {
-    if (creating && creating.parentPath === nodePath && node.type === "folder") {
-      setIsOpen(true);
-    }
-  }, [creating, nodePath, node.type]);
-
-  const isActive = node.type === "file" && activeFilePath === nodePath;
-  const isRenaming = renamingPath === nodePath;
-
-  const handleClick = useCallback(() => {
-    if (isRenaming) return;
-    if (node.type === "folder") {
-      setIsOpen(!isOpen);
-    } else {
-      openTab(nodePath);
-    }
-  }, [node, isOpen, openTab, isRenaming, nodePath]);
-
-  const handleDragStart = useCallback((e: React.DragEvent) => {
-    e.dataTransfer.setData(TREE_DND_TYPE, nodePath);
-    if (node.type === "file") {
-      e.dataTransfer.setData("application/wzed-file", nodePath);
-    }
-    e.dataTransfer.effectAllowed = "move";
-    e.stopPropagation();
-  }, [node, nodePath]);
-
-  const handleDragOver = useCallback((e: React.DragEvent) => {
-    if (!e.dataTransfer.types.includes(TREE_DND_TYPE)) return;
-    e.preventDefault();
-    e.stopPropagation();
-    e.dataTransfer.dropEffect = "move";
-
-    const el = rowRef.current;
-    if (!el) return;
-    const rect = el.getBoundingClientRect();
-    const y = e.clientY - rect.top;
-    const h = rect.height;
-
-    if (node.type === "folder") {
-      if (y < h * 0.25) setDropPos("above");
-      else if (y > h * 0.75) setDropPos("below");
-      else setDropPos("into");
-    } else {
-      setDropPos(y < h / 2 ? "above" : "below");
-    }
-  }, [node.type]);
-
-  const handleDragLeave = useCallback((e: React.DragEvent) => {
-    if (rowRef.current && !rowRef.current.contains(e.relatedTarget as Node)) {
-      setDropPos(null);
-    }
-  }, []);
-
-  const handleDrop = useCallback((e: React.DragEvent) => {
-    e.preventDefault();
-    e.stopPropagation();
-    const pos = dropPos;
-    setDropPos(null);
-
-    const draggedPath = e.dataTransfer.getData(TREE_DND_TYPE);
-    if (!draggedPath || draggedPath === nodePath) return;
-
-    if (pos === "into" && node.type === "folder") {
-      moveNode(draggedPath, nodePath);
-      setIsOpen(true);
-    } else if (pos === "above" || pos === "below") {
-      moveNode(draggedPath, parentPath);
-    }
-  }, [dropPos, node, moveNode, parentPath, nodePath]);
-
-  const paddingLeft = depth * 12 + 8;
-
-  const showCreateInside = creating && creating.parentPath === nodePath && node.type === "folder";
-
-  return (
-    <div>
-      <div
-        ref={rowRef}
-        onClick={handleClick}
-        onContextMenu={(e) => onContextMenu(e, node, parentPath)}
-        draggable={!isRenaming}
-        onDragStart={handleDragStart}
-        onDragOver={handleDragOver}
-        onDragLeave={handleDragLeave}
-        onDrop={handleDrop}
-        className={cn(
-          "flex items-center gap-1.5 py-[3px] pr-2 cursor-pointer select-none text-[13px] group relative",
-          "hover:bg-hover",
-          isActive ? "bg-hover text-t1" : "text-t3",
-          dropPos === "into" && "bg-accent/15"
-        )}
-        style={{ paddingLeft }}
-      >
-        {dropPos === "above" && (
-          <div className="absolute left-0 right-0 top-0 h-[2px] bg-accent rounded-full z-10" style={{ marginLeft: paddingLeft }} />
-        )}
-        {dropPos === "below" && (
-          <div className="absolute left-0 right-0 bottom-0 h-[2px] bg-accent rounded-full z-10" style={{ marginLeft: paddingLeft }} />
-        )}
-
-        {depth > 0 && Array.from({ length: depth }).map((_, i) => (
-          <div key={i} className="absolute top-0 bottom-0 w-px bg-border" style={{ left: i * 12 + 20 }} />
-        ))}
-
-        {node.type === "folder" ? (
-          <span className="text-t4 w-4 flex items-center justify-center flex-shrink-0">
-            {isOpen ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
-          </span>
-        ) : (
-          <span className="w-4 flex-shrink-0" />
-        )}
-
-        {node.type === "folder" ? <FolderIcon open={isOpen} size={14} /> : <FileIcon name={node.name} size={14} />}
-
-        {isRenaming ? (
-          <InlineRenameInput
-            name={node.name}
-            onCommit={(newName) => onRenameCommit(nodePath, newName)}
-            onCancel={onRenameCancel}
-          />
-        ) : (
-          <span className="truncate text-[13px]">{node.name}</span>
-        )}
-      </div>
-
-      {node.type === "folder" && isOpen && (
-        <div>
-          {node.children?.map((child, idx) => (
-            <FileTreeItem
-              key={child.path || idx}
-              node={child}
-              depth={depth + 1}
-              defaultOpen={
-                child.name === "crates" ||
-                child.name === "zed" ||
-                child.name === "src"
-              }
-              onContextMenu={onContextMenu}
-              renamingPath={renamingPath}
-              onRenameCommit={onRenameCommit}
-              onRenameCancel={onRenameCancel}
-              parentPath={nodePath}
-              creating={creating}
-              onCreateCommit={onCreateCommit}
-              onCreateCancel={onCreateCancel}
-              forceCollapsed={forceCollapsed}
-            />
-          ))}
-          {showCreateInside && (
-            <div
-              className="flex items-center gap-1.5 py-[3px] pr-2 text-[13px]"
-              style={{ paddingLeft: (depth + 1) * 12 + 8 }}
+    <div
+      data-file-tree-context-menu-root="true"
+      role="menu"
+      className="fixed z-[200] min-w-[220px] rounded-lg border border-scroll-thumb bg-bg3 p-1 text-[12px] shadow-xl shadow-black/50"
+      style={{ left: context.anchorRect.left, top: context.anchorRect.bottom }}
+    >
+      {sections.map((section, sectionIndex) => (
+        <div key={sectionIndex}>
+          {sectionIndex > 0 && <div role="separator" className="mx-2 my-1 h-px bg-scroll-thumb" />}
+          {section.items.map((item, itemIndex) => (
+            <button
+              key={itemIndex}
+              type="button"
+              role="menuitem"
+              disabled={item.disabled}
+              onClick={() => run(item.onClick)}
+              className="flex w-full items-center justify-between rounded-md px-2.5 py-1.5 text-left text-t3 outline-none hover:bg-selection hover:text-t1 focus-visible:bg-selection focus-visible:text-t1 disabled:text-t5"
             >
-              <span className="w-4 flex-shrink-0" />
-              {creating.type === "folder" ? <FolderIcon open={false} size={14} /> : <FileIcon name="untitled" size={14} />}
-              <InlineCreateInput
-                placeholder={creating.type === "file" ? "filename" : "folder name"}
-                onCommit={onCreateCommit}
-                onCancel={onCreateCancel}
-              />
-            </div>
-          )}
+              <span>{item.label}</span>
+              {item.shortcut && <span className="ml-6 font-mono text-[11px] text-t5">{item.shortcut}</span>}
+            </button>
+          ))}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+export const FileTree = forwardRef<FileTreeHandle, FileTreeProps>(function FileTree(
+  { paths, onSearchOpenChange },
+  ref,
+) {
+  const flatPaths = useMemo(() => [...paths], [paths]);
+  const pathKey = flatPaths.join("\u0000");
+
+  const openTab = useWorkspaceStore((state) => state.openTab);
+  const setLeftPanel = useWorkspaceStore((state) => state.setLeftPanel);
+  const setBottomPanel = useWorkspaceStore((state) => state.setBottomPanel);
+  const renameFile = useWorkspaceStore((state) => state.renameFile);
+  const moveNode = useWorkspaceStore((state) => state.moveNode);
+  const createFile = useWorkspaceStore((state) => state.createFile);
+  const createFolder = useWorkspaceStore((state) => state.createFolder);
+  const deleteNode = useWorkspaceStore((state) => state.deleteNode);
+  const duplicateFile = useWorkspaceStore((state) => state.duplicateFile);
+  const collapseCounter = useWorkspaceStore((state) => state.collapseCounter);
+  const activeFilePath = useWorkspaceStore((state) =>
+    state.panes[state.activePaneId]?.activeTab ?? "",
+  );
+  const gitStatuses = useRepositoryStatusStore((state) => state.treeStatuses);
+
+  const openTabRef = useRef(openTab);
+  const renameFileRef = useRef(renameFile);
+  const moveNodeRef = useRef(moveNode);
+  const createFileRef = useRef(createFile);
+  const createFolderRef = useRef(createFolder);
+  const pendingCreateRef = useRef<PendingCreate | null>(null);
+  const syncingActiveSelectionRef = useRef(false);
+  useEffect(() => { openTabRef.current = openTab; }, [openTab]);
+  useEffect(() => { renameFileRef.current = renameFile; }, [renameFile]);
+  useEffect(() => { moveNodeRef.current = moveNode; }, [moveNode]);
+  useEffect(() => { createFileRef.current = createFile; }, [createFile]);
+  useEffect(() => { createFolderRef.current = createFolder; }, [createFolder]);
+
+  const { model } = useFileTree({
+    paths: flatPaths,
+    initialExpansion: 1,
+    flattenEmptyDirectories: false,
+    search: true,
+    fileTreeSearchMode: "hide-non-matches",
+    itemHeight: 25,
+    overscan: 12,
+    stickyFolders: true,
+    unsafeCSS: TREE_CSS,
+    composition: {
+      contextMenu: { enabled: true, triggerMode: "right-click" },
+    },
+    onSelectionChange: (selectedPaths) => {
+      if (syncingActiveSelectionRef.current) return;
+      if (selectedPaths.length !== 1) return;
+      const item = modelRef.current?.getItem(selectedPaths[0]);
+      if (item && !item.isDirectory()) openTabRef.current(toVfsPath(selectedPaths[0]));
+    },
+    renaming: {
+      onRename: ({ sourcePath, destinationPath }) => {
+        const pending = pendingCreateRef.current;
+        if (pending && toTreePath(sourcePath, pending.type === "folder") === pending.sourcePath) {
+          const name = treeBasename(destinationPath);
+          if (pending.type === "file") createFileRef.current(name, pending.parentPath);
+          else createFolderRef.current(name, pending.parentPath);
+          pendingCreateRef.current = null;
+          return;
+        }
+        renameFileRef.current(toVfsPath(sourcePath), treeBasename(destinationPath));
+      },
+      onError: (error) => {
+        pendingCreateRef.current = null;
+        console.error("Unable to rename tree item:", error);
+      },
+    },
+    dragAndDrop: {
+      canDrag: (draggedPaths) => draggedPaths.length === 1,
+      onDropComplete: (event: FileTreeDropResult) => {
+        const source = event.draggedPaths[0];
+        if (!source) return;
+        moveNodeRef.current(
+          toVfsPath(source),
+          event.target.directoryPath ? toVfsPath(event.target.directoryPath) : null,
+        );
+      },
+      onDropError: (error) => console.error("Unable to move tree item:", error),
+    },
+  });
+  const modelRef = useRef(model);
+  modelRef.current = model;
+  const search = useFileTreeSearch(model);
+
+  useImperativeHandle(ref, () => ({
+    toggleSearch: () => {
+      if (model.isSearchOpen()) model.closeSearch();
+      else model.openSearch();
+    },
+  }), [model]);
+
+  useEffect(() => {
+    onSearchOpenChange?.(search.isOpen);
+  }, [onSearchOpenChange, search.isOpen]);
+
+  useEffect(() => {
+    model.resetPaths(flatPaths);
+  }, [model, pathKey, flatPaths]);
+
+  useEffect(() => {
+    model.setGitStatus(gitStatuses);
+  }, [model, gitStatuses]);
+
+  useEffect(() => {
+    if (!collapseCounter) return;
+    for (const path of flatPaths) {
+      if (!path.endsWith("/")) continue;
+      const item = model.getItem(path);
+      if (item?.isDirectory()) (item as FileTreeDirectoryHandle).collapse();
+    }
+  }, [model, collapseCounter, pathKey]);
+
+  useEffect(() => {
+    const treePath = toTreePath(activeFilePath);
+    if (!treePath) return;
+    const item = model.getItem(treePath);
+    if (!item || item.isDirectory()) return;
+    const selectedPaths = model.getSelectedPaths();
+    if (selectedPaths.length === 1 && selectedPaths[0] === treePath) return;
+    syncingActiveSelectionRef.current = true;
+    for (const selectedPath of selectedPaths) model.getItem(selectedPath)?.deselect();
+    item.select();
+    model.scrollToPath(treePath, { focus: false, offset: "nearest" });
+    syncingActiveSelectionRef.current = false;
+  }, [model, activeFilePath, pathKey]);
+
+  const collapseAll = useCallback(() => {
+    for (const path of flatPaths) {
+      if (!path.endsWith("/")) continue;
+      const item = model.getItem(path);
+      if (item?.isDirectory()) (item as FileTreeDirectoryHandle).collapse();
+    }
+  }, [model, pathKey]);
+
+  const startCreate = useCallback((type: "file" | "folder", parentPath: string | null) => {
+    const parentTreePath = parentPath ? toTreePath(parentPath, true) : "";
+    let suffix = 1;
+    let basename = "untitled";
+    let sourcePath = `${parentTreePath}${basename}${type === "folder" ? "/" : ""}`;
+    while (model.getItem(sourcePath)) {
+      basename = `untitled-${++suffix}`;
+      sourcePath = `${parentTreePath}${basename}${type === "folder" ? "/" : ""}`;
+    }
+    pendingCreateRef.current = { type, parentPath, sourcePath };
+    model.add(sourcePath);
+    model.startRenaming(sourcePath, { removeIfCanceled: true });
+  }, [model]);
+
+  const menuSections = useCallback((item: PierreContextMenuItem): ContextMenuSection[] => {
+    const vfsPath = toVfsPath(item.path);
+    const parentVfsPath = treeParentPath(item.path);
+    const parent = parentVfsPath ? toVfsPath(parentVfsPath) : null;
+    const isFile = item.kind === "file";
+    const createParent = isFile ? parent : vfsPath;
+    const sections: ContextMenuSection[] = [];
+
+    if (isFile) sections.push({ items: [{ label: "Open", onClick: () => openTab(vfsPath) }] });
+    sections.push({ items: [
+      { label: "New File...", onClick: () => startCreate("file", createParent) },
+      { label: "New Folder...", onClick: () => startCreate("folder", createParent) },
+    ] });
+    sections.push({ items: [
+      ...(isFile ? [{ label: "Duplicate", onClick: () => duplicateFile(vfsPath) }] : []),
+      { label: "Rename", shortcut: "F2", onClick: () => model.startRenaming(item.path) },
+    ] });
+    sections.push({ items: [
+      { label: "Copy Name", onClick: () => copyToClipboard(item.name) },
+      { label: "Copy Path", shortcut: "Alt-Shift-C", onClick: () => copyToClipboard(vfsPath) },
+    ] });
+    sections.push({ items: [
+      { label: "Find in Folder", shortcut: "Alt-Shift-F", onClick: () => setLeftPanel("search") },
+      { label: "Open in Terminal", onClick: () => setBottomPanel("terminal") },
+    ] });
+    if (!isFile) sections.push({ items: [{ label: "Collapse All", onClick: collapseAll }] });
+    sections.push({ items: [{ label: "Delete", shortcut: "Del", onClick: () => deleteNode(vfsPath) }] });
+    return sections;
+  }, [collapseAll, deleteNode, duplicateFile, model, openTab, setBottomPanel, setLeftPanel, startCreate]);
+
+  return (
+    <div className="relative h-full min-h-0">
+      <PierreFileTree
+        model={model}
+        style={TREE_STYLE}
+        renderContextMenu={(item, context) => (
+          <TreeContextMenu sections={menuSections(item)} context={context} />
+        )}
+      />
+      {flatPaths.length === 0 && (
+        <div className={`pointer-events-none absolute inset-x-0 ${search.isOpen ? "top-[34px]" : "top-0"} px-3 py-4 text-center text-xs text-t4`}>
+          <p>No files yet. Open a project or use the terminal.</p>
+          <div className="pointer-events-auto mt-2 flex justify-center gap-2">
+            <button className="text-accent hover:underline" onClick={() => startCreate("file", null)}>New file</button>
+            <button className="text-accent hover:underline" onClick={() => startCreate("folder", null)}>New folder</button>
+          </div>
         </div>
       )}
     </div>
   );
 });
-
-export function FileTree({ files }: { files: FileNode[] }) {
-  const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
-  const [renamingPath, setRenamingPath] = useState<string | null>(null);
-  const [creating, setCreating] = useState<CreatingState | null>(null);
-  const [rootDragOver, setRootDragOver] = useState(false);
-  const forceCollapsed = useWorkspaceStore((s) => s.collapseCounter);
-  const openTab = useWorkspaceStore((s) => s.openTab);
-  const setLeftPanel = useWorkspaceStore((s) => s.setLeftPanel);
-  const setBottomPanel = useWorkspaceStore((s) => s.setBottomPanel);
-  const renameFile = useWorkspaceStore((s) => s.renameFile);
-  const moveNode = useWorkspaceStore((s) => s.moveNode);
-  const createFile = useWorkspaceStore((s) => s.createFile);
-  const createFolder = useWorkspaceStore((s) => s.createFolder);
-  const deleteNode = useWorkspaceStore((s) => s.deleteNode);
-  const duplicateFile = useWorkspaceStore((s) => s.duplicateFile);
-  const collapseAll = useWorkspaceStore((s) => s.collapseAll);
-
-  const menuActions: FileMenuActions = {
-    openTab,
-    openSearch: () => setLeftPanel("search"),
-    openTerminal: () => setBottomPanel("terminal"),
-    startRename: (nodePath: string) => setRenamingPath(nodePath),
-    deleteNode,
-    duplicateFile,
-    createFile: (parentPath: string | null) => setCreating({ type: "file", parentPath }),
-    createFolder: (parentPath: string | null) => setCreating({ type: "folder", parentPath }),
-    collapseAll,
-  };
-
-  const handleItemContextMenu = useCallback((e: React.MouseEvent, node: FileNode, parentPath: string | null) => {
-    e.preventDefault();
-    e.stopPropagation();
-    const sections = node.type === "file"
-      ? getFileContextMenu(node, menuActions, parentPath)
-      : getFolderContextMenu(node, menuActions);
-    setContextMenu({ x: e.clientX, y: e.clientY, sections });
-  }, [openTab, setLeftPanel, setBottomPanel, deleteNode, duplicateFile]);
-
-  const handleBackgroundContextMenu = useCallback((e: React.MouseEvent) => {
-    e.preventDefault();
-    setContextMenu({ x: e.clientX, y: e.clientY, sections: getBackgroundContextMenu(menuActions) });
-  }, []);
-
-  const handleRenameCommit = useCallback((oldPath: string, newName: string) => {
-    renameFile(oldPath, newName);
-    setRenamingPath(null);
-  }, [renameFile]);
-
-  const handleRenameCancel = useCallback(() => {
-    setRenamingPath(null);
-  }, []);
-
-  const handleCreateCommit = useCallback((name: string) => {
-    if (!creating) return;
-    if (creating.type === "file") {
-      createFile(name, creating.parentPath);
-    } else {
-      createFolder(name, creating.parentPath);
-    }
-    setCreating(null);
-  }, [creating, createFile, createFolder]);
-
-  const handleCreateCancel = useCallback(() => {
-    setCreating(null);
-  }, []);
-
-  const handleRootDragOver = useCallback((e: React.DragEvent) => {
-    if (!e.dataTransfer.types.includes(TREE_DND_TYPE)) return;
-    e.preventDefault();
-    e.dataTransfer.dropEffect = "move";
-  }, []);
-
-  const handleRootDrop = useCallback((e: React.DragEvent) => {
-    e.preventDefault();
-    setRootDragOver(false);
-    const draggedPath = e.dataTransfer.getData(TREE_DND_TYPE);
-    if (draggedPath) {
-      moveNode(draggedPath, null);
-    }
-  }, [moveNode]);
-
-  const showRootCreate = creating && creating.parentPath === null;
-
-  return (
-    <div
-      className={cn("py-1 min-h-full", rootDragOver && "bg-accent/10")}
-      onContextMenu={handleBackgroundContextMenu}
-      onDragOver={(e) => {
-        handleRootDragOver(e);
-        if (e.dataTransfer.types.includes(TREE_DND_TYPE)) setRootDragOver(true);
-      }}
-      onDragLeave={(e) => {
-        if (e.currentTarget === e.target) setRootDragOver(false);
-      }}
-      onDrop={handleRootDrop}
-    >
-      {files.length === 0 && !showRootCreate && (
-        <div className="px-3 py-4 text-t4 text-xs text-center">
-          No files yet. Open a project or use the terminal.
-        </div>
-      )}
-      {files.map((node, idx) => (
-        <FileTreeItem
-          key={node.path || idx}
-          node={node}
-          defaultOpen={node.type === "folder"}
-          onContextMenu={handleItemContextMenu}
-          renamingPath={renamingPath}
-          onRenameCommit={handleRenameCommit}
-          onRenameCancel={handleRenameCancel}
-          parentPath={null}
-          creating={creating}
-          onCreateCommit={handleCreateCommit}
-          onCreateCancel={handleCreateCancel}
-          forceCollapsed={forceCollapsed}
-        />
-      ))}
-
-      {showRootCreate && (
-        <div className="flex items-center gap-1.5 py-[3px] pr-2 text-[13px]" style={{ paddingLeft: 8 }}>
-          <span className="w-4 flex-shrink-0" />
-          {creating.type === "folder" ? <FolderIcon open={false} size={14} /> : <FileIcon name="untitled" size={14} />}
-          <InlineCreateInput
-            placeholder={creating.type === "file" ? "filename" : "folder name"}
-            onCommit={handleCreateCommit}
-            onCancel={handleCreateCancel}
-          />
-        </div>
-      )}
-
-      {contextMenu && (
-        <ContextMenu
-          x={contextMenu.x}
-          y={contextMenu.y}
-          sections={contextMenu.sections}
-          onClose={() => setContextMenu(null)}
-        />
-      )}
-    </div>
-  );
-}

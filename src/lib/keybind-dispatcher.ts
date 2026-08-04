@@ -1,6 +1,7 @@
 import { useKeymapStore, type KeyBinding } from "@/stores/keymap-store";
 import { useWorkspaceStore } from "@/stores/workspace-store";
 import { useSettingsStore } from "@/stores/settings-store";
+import { saveAllWorkspaceFiles, saveWorkspaceFile } from "@/lib/workspace-repository";
 
 export function eventToKeyString(e: KeyboardEvent): string | null {
   if (["Control", "Shift", "Alt", "Meta"].includes(e.key)) return null;
@@ -83,14 +84,24 @@ export function executeAction(action: string): boolean {
       ws.openPalette("");
       return true;
     case "file: save": {
+      window.dispatchEvent(
+        new CustomEvent("wzed:editor-command", { detail: { command: "flush" } }),
+      );
       const pane = ws.panes[ws.activePaneId];
-      if (pane?.activeTab) ws.markFileSaved(pane.activeTab);
+      if (pane?.activeTab) {
+        void saveWorkspaceFile(pane.activeTab).catch((error) => {
+          console.error("Failed to save file:", pane.activeTab, error);
+        });
+      }
       return true;
     }
     case "file: save all":
-      for (const path of Object.keys(ws.openFiles)) {
-        ws.markFileSaved(path);
-      }
+      window.dispatchEvent(
+        new CustomEvent("wzed:editor-command", { detail: { command: "flush-all" } }),
+      );
+      void saveAllWorkspaceFiles().catch((error) => {
+        console.error("Failed to save files:", error);
+      });
       return true;
     case "file: new file":
       ws.createFile("untitled", null);
